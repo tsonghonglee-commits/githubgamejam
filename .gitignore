@@ -1,0 +1,30 @@
+# Godot 4 generated data. Keep *.uid, *.import and export_presets.cfg in Git.
+.godot/
+*.translation
+
+# Build outputs and local machine settings.
+/builds/*
+!/builds/.gdignore
+/.local/
+export_credentials.cfg
+*.log
+
+# Editor / OS state.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+*.bak
+
+# Credentials.
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.keystore
+*.jks
+*.key
+*.pem
