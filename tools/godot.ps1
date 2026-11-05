@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Editor', 'Run', 'Check', 'ExportWindows', 'ExportWeb')]
+    [ValidateSet('Editor', 'Run', 'Check', 'Verify', 'ExportWindows', 'ExportWeb', 'ExportAndroid')]
     [string]$Task = 'Editor'
 )
 
@@ -59,11 +59,18 @@ switch ($Task) {
         Write-Host 'Project import and startup checks passed.'
     }
     'ExportWindows' {
-        New-Item -ItemType Directory -Path (Join-Path $projectRoot 'builds/windows') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $projectRoot 'builds/windows-v073') -Force | Out-Null
         Invoke-GodotChecked -EngineArguments @('--headless', '--path', $projectRoot, '--export-release', 'Windows Desktop')
+    }
+    'Verify' {
+        Invoke-GodotChecked -EngineArguments @('--headless', '--path', $projectRoot, '--script', 'res://tools/prototype_verify.gd', '--', '--verify-prototype')
     }
     'ExportWeb' {
         New-Item -ItemType Directory -Path (Join-Path $projectRoot 'builds/web') -Force | Out-Null
         Invoke-GodotChecked -EngineArguments @('--headless', '--path', $projectRoot, '--export-release', 'Web')
+    }
+    'ExportAndroid' {
+        New-Item -ItemType Directory -Path (Join-Path $projectRoot 'builds/android') -Force | Out-Null
+        Invoke-GodotChecked -EngineArguments @('--headless', '--path', $projectRoot, '--export-debug', 'Android')
     }
 }

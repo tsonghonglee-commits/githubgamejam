@@ -1,0 +1,22 @@
+{
+  "version": "0.7.1",
+  "date": "2026-11-05",
+  "timezone": "Asia/Shanghai",
+  "status": "prototype_baseline_for_rendering_study",
+  "archive_directory": "builds/milestones/v0.7.1-20261105",
+  "source_archive": "builds/milestones/v0.7.1-20261105/source-v0.7.1.zip",
+  "source_archive_sha256": "0D37D2ABC010A2F29E9CFEB84BB3CB3FF8EB4E97CF76FA3040789AB5EEB5AB1D",
+  "playable_archive": "builds/milestones/v0.7.1-20261105/SHIFT-CUT-v0.7.1-Windows.zip",
+  "playable_archive_sha256": "5362555BAAF1BA1DD7FBFE25F0BB09E3B039B28FEB35691410934FE8AA6B9639",
+  "pck_sha256": "4396DCA09EAF4D53C8C6B9D81CA2132F16703105133A774002C3E707E1DC2852",
+  "source_file_count": 39,
+  "includes_uncommitted_workspace_files": true,
+  "engine": "4.7.2.stable.official.ed1daf0bf",
+  "renderer": "gl_compatibility",
+  "display": {
+    "msaa": "4x",
+    "vsync": "enabled",
+    "fullscreen": true
+  },
+  "details": "See DESIGN.md sections 18 and 19, and archive manifest.json."
+}
