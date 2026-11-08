@@ -1,0 +1,25 @@
+{
+  "version": "0.9.5",
+  "date": "2026-11-08",
+  "timezone": "Asia/Shanghai",
+  "engine": "4.7.2.stable.official.ed1daf0bf",
+  "status": "validated_local_prototype_source_checkpoint",
+  "git_tag": "v0.9.5",
+  "source_base_commit": "5189b88f2ab92b38734fd7c7debaaf97b8131107",
+  "pck_sha256": "355B6CA4AA06F168BAA1A8741EEA967CD521ABC2160AE51C367D53D5F4579BC9",
+  "playable_archive": "builds/SHIFT-CUT-v0.9.5-Windows.zip",
+  "playable_archive_sha256": "02B2DB4D74754E192C80488F5C8DF522595E1935D997EA36D72226E1046FB0F8",
+  "source_input_count": 34,
+  "validation": {
+    "normal_route_seconds": 180,
+    "original_behavior": 126,
+    "normal_p99_ms": 21.264,
+    "physical_combat": 313,
+    "held_fx": 53,
+    "normal_route_plus_boss_real_seconds": 244.942598,
+    "normal_over_50ms_frames": 2,
+    "obstacles": 64,
+    "material_mesh_parity": 249
+  },
+  "scope": "Source checkpoint before Slay the highway / 杀路 UI work. Local build/review artifacts are ignored and are not uploaded with source. Automated fixtures and playback are not user feel approval."
+}

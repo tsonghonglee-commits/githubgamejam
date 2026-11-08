@@ -4,12 +4,23 @@ extends SceneTree
 
 const STEP := 1.0 / 60.0
 const MOUSE_GAIN := 0.55
+const REVIEW_SOURCE_PATHS: Array[String] = [
+	"res://scenes/main.tscn", "res://assets/icon.svg", "res://scripts/main.gd", "res://scripts/katana_view.gd",
+	"res://scripts/voxel_enemy.gd", "res://scripts/voxel_debris.gd",
+	"res://scripts/prototype_hud.gd", "res://scripts/prototype_audio.gd",
+	"res://scripts/projectile_view.gd", "res://scripts/voxel_blast.gd",
+	"res://scripts/route_sections.gd", "res://scripts/projectile_geometry.gd",
+	"res://scripts/enemy_motion.gd", "res://scripts/touch_controls.gd",
+]
 
 var game
 var policy := "basic"
 var route_seconds := 60.0
 var output_dir := ""
 var fast_mode := false
+var buffer_captures := false
+var buffered_captures: Array[Dictionary] = []
+var capture_readback_ms: Array[float] = []
 var run_label := ""
 var max_seconds := 0.0
 var output: Dictionary = {}
@@ -55,6 +66,8 @@ var first_sever_enemy_id := 0
 var sever_samples: Array = []
 var enemy_spawn_cells: Dictionary = {}
 var observed_enemies: Dictionary = {}
+var observed_cut_counts: Dictionary = {}
+var observed_cut_times_ms: Array[float] = []
 var fragment_records: Dictionary = {}
 var chip_ids_seen: Dictionary = {}
 var fragments_spawned_seen := 0
@@ -74,6 +87,13 @@ var previous_contact_grip := Vector2(INF, INF)
 var previous_contact_point := Vector2(INF, INF)
 var max_live_cut_particles := 0
 var cut_particle_records: Dictionary = {}
+var section_transitions: Array[Dictionary] = []
+var long_frames: Array[Dictionary] = []
+var observed_route_section := -1
+var observes_sections := false
+var observes_blasts := false
+var runtime_manifest_before: Dictionary = {}
+var review_tool_hash_before := ""
 
 
 func _initialize() -> void:
@@ -88,6 +108,8 @@ func _initialize() -> void:
 			run_label = argument.trim_prefix("--run-label=")
 		elif argument == "--fast":
 			fast_mode = true
+		elif argument == "--buffer-captures":
+			buffer_captures = true
 	if not policy in ["basic", "speed", "mixed"]:
 		policy = "basic"
 	run_seed = 73001 + ["basic", "speed", "mixed"].find(policy)
@@ -186,12 +208,12 @@ func _press_parry(threat: Dictionary) -> void:
 
 
 func _visible_body(enemy) -> Vector2:
-	# Fixed silhouette heights intentionally avoid private core coordinates or voxel bounds.
-	var height := 2.2 if enemy.enemy_kind == "boss" else (1.6 if enemy.enemy_kind == "tank" else 1.5)
-	var point: Vector3 = enemy.global_position + Vector3(0.0, height, 0.0)
-	if game.camera.is_position_behind(point):
+	# Follow the projected visible silhouette as new models crouch, stride or
+	# hover. No private core/tag coordinates feed normal-play targeting.
+	var bounds: Rect2 = enemy.get_screen_bounds(game.camera)
+	if bounds.size == Vector2.ZERO:
 		return Vector2(INF, INF)
-	return game.camera.unproject_position(point)
+	return bounds.get_center()
 
 
 func _in_view(screen: Vector2) -> bool:
@@ -262,6 +284,7 @@ func _step_sweep() -> void:
 
 func _observe(dt: float) -> void:
 	frames += 1
+	_observe_route_section()
 	min_speed = minf(min_speed, float(game.speed))
 	max_speed = maxf(max_speed, float(game.speed))
 	if game.practice or game.training:
@@ -335,6 +358,62 @@ func _observe(dt: float) -> void:
 			if not before.is_empty() and dt > 0.00001:
 				velocity_z = (point.z - float(before.z)) / maxf(game.game_clock - float(before.world), 0.00001)
 			previous_projectiles[identifier] = {"z": point.z, "world": game.game_clock, "velocity_z": velocity_z}
+			if point.z > -17.0:
+				_queue_capture("projectile-" + str(projectile.kind) + ("-reflected" if bool(projectile.get("reflected", false)) else "-incoming"))
+	if observes_blasts and not game.blasts.is_empty():
+		_queue_capture("projectile-explosion")
+
+
+func _observe_route_section() -> void:
+	if not observes_sections:
+		return
+	var section: int = int(game.route_section)
+	if section == observed_route_section:
+		return
+	section_transitions.append({"controller_time":clock,"world_time":game.game_clock,"route_time":game.elapsed,"run_distance":game.run_distance,"from":observed_route_section,"section":section})
+	observed_route_section = section
+	_queue_capture("section-%02d" % section)
+
+
+func _record_long_frame(interval_ms: float) -> void:
+	if interval_ms <= 50.0:
+		return
+	var active_enemies := 0
+	var enemy_nodes := 0
+	for enemy in game.enemies:
+		if is_instance_valid(enemy) and not enemy.is_queued_for_deletion():
+			enemy_nodes += 1
+			if not enemy.dead and not enemy.resolved:
+				active_enemies += 1
+	var active_projectiles := 0
+	for projectile in game.projectiles:
+		if is_instance_valid(projectile.node) and not projectile.node.is_queued_for_deletion():
+			active_projectiles += 1
+	var active_blasts := 0
+	if observes_blasts:
+		for blast in game.blasts:
+			if is_instance_valid(blast) and not blast.is_queued_for_deletion():
+				active_blasts += 1
+	var event_tail: Array = []
+	var events: Array = game.combat_events
+	for index in range(maxi(0, events.size()-3), events.size()):
+		event_tail.append(events[index].duplicate(true))
+	# The interval ends at this process_frame resume, before new controller
+	# input. Captures and all prior-frame work remain inside that interval.
+	long_frames.append({"interval_ms":interval_ms,"controller_time":clock,"world_time":game.game_clock,"route_time":game.elapsed,"run_distance":game.run_distance,"route_section":int(game.route_section) if observes_sections else -1,"active_enemies":active_enemies,"enemy_nodes":enemy_nodes,"active_projectiles":active_projectiles,"active_blasts":active_blasts,"event_tail":event_tail,"sample_phase":"process_frame resume before next controller input"})
+
+
+func _runtime_manifest() -> Dictionary:
+	var result: Dictionary = {}
+	for path in REVIEW_SOURCE_PATHS:
+		var raw_exists := FileAccess.file_exists(path)
+		var runtime_path: String = path if raw_exists else ""
+		if not raw_exists and FileAccess.file_exists(path+".remap"):
+			var remap := ConfigFile.new()
+			if remap.load(path+".remap") == OK:
+				runtime_path = str(remap.get_value("remap","path",""))
+		result[path] = {"raw_sha256":FileAccess.get_sha256(path) if raw_exists else "","runtime_path":runtime_path,"runtime_sha256":FileAccess.get_sha256(runtime_path) if not runtime_path.is_empty() and FileAccess.file_exists(runtime_path) else ""}
+	return result
 
 
 func _on_observed_sever(enemy: Node3D, _point: Vector3, removed: int) -> void:
@@ -367,6 +446,10 @@ func _observe_fragments() -> void:
 		if not is_instance_valid(enemy) or enemy.is_queued_for_deletion():
 			continue
 		var enemy_key := str(enemy.get_instance_id())
+		var cut_count: int = int(enemy.cut_count)
+		if cut_count > int(observed_cut_counts.get(enemy_key, 0)):
+			observed_cut_counts[enemy_key] = cut_count
+			observed_cut_times_ms.append(float(enemy.last_cut_usec) * 0.001)
 		if enemy.has_method("get_cut_particle_debug_state"):
 			var burst: Dictionary = enemy.get_cut_particle_debug_state()
 			particle_count += int(burst.get("active_count", 0))
@@ -489,11 +572,13 @@ func _imminent_threat() -> Dictionary:
 				return {"type": "melee", "enemy": enemy}
 	for projectile in game.projectiles:
 		var node: Node3D = projectile.node
-		if not is_instance_valid(node) or node.position.z < -5.0:
+		if not is_instance_valid(node) or node.position.z < -5.0 or bool(projectile.get("reflected", false)):
 			continue
 		var identifier := str(node.get_instance_id())
 		var observation: Dictionary = previous_projectiles.get(identifier, {})
 		var approach_speed := float(observation.get("velocity_z", 0.0))
+		if approach_speed <= 0.0:
+			continue
 		var time_left := (-node.position.z - 0.9) / maxf(approach_speed, 1.0)
 		var response_lead := 0.19 if policy == "basic" else 0.10
 		if time_left > -0.05 and time_left < response_lead:
@@ -517,7 +602,7 @@ func _target() -> Node3D:
 			continue
 		if enemy.enemy_kind == "boss" and boss_strikes_seen < 2:
 			continue
-		if enemy.enemy_kind != "boss" and not attack_pose_ready.has(enemy.enemy_kind):
+		if enemy.enemy_kind not in ["boss", "barrier", "beam"] and not attack_pose_ready.has(enemy.enemy_kind):
 			# The first member of each kind must complete a real strike or fire a shot.
 			continue
 		if policy == "basic" and enemy.enemy_kind == "normal" and game.kills == 0:
@@ -525,6 +610,10 @@ func _target() -> Node3D:
 			if not action in ["recover", "stagger", "exit"]:
 				continue
 		var distance: float = -enemy.position.z
+		if enemy.enemy_kind in ["barrier", "beam"]:
+			# A physical obstruction has no attack windup to wait for and cannot
+			# be answered by parrying. Start cutting its visible span on approach.
+			distance -= 24.0
 		if action in ["windup", "ranged_charge"]:
 			distance -= 10.0
 		if distance < best:
@@ -573,7 +662,7 @@ func _control(dt: float) -> void:
 	if target == null:
 		return
 	var action: String = str(target.get_meta("action_state", "run"))
-	var use_long: bool = policy == "speed" or (policy == "mixed" and target.enemy_kind in ["tank", "boss"])
+	var use_long: bool = policy == "speed" or (policy == "mixed" and target.enemy_kind in ["tank", "boss", "barrier", "beam", "missile_drone"])
 	if target.enemy_kind == "boss" and action in ["boss_windup", "boss_strike"]:
 		# Let the pose finish; answer its shot, then attack the recovery opening.
 		return
@@ -604,8 +693,14 @@ func _capture_next(after_render: bool = false) -> void:
 	screenshots_taken[name] = true
 	if not after_render:
 		await RenderingServer.frame_post_draw
+	var started := Time.get_ticks_usec()
 	var image: Image = game.get_viewport().get_texture().get_image()
-	image.save_png(output_dir.path_join(run_label + "-" + name + ".png"))
+	capture_readback_ms.append(float(Time.get_ticks_usec() - started) * 0.001)
+	var path := output_dir.path_join(run_label + "-" + name + ".png")
+	if buffer_captures:
+		buffered_captures.append({"image": image, "path": path})
+	else:
+		image.save_png(path)
 	capture_timing[name] = {"controller_time": clock, "world_time": game.game_clock, "since_first_sever_real": game.real_clock - first_sever_real_clock if first_sever_real_clock >= 0.0 else -1.0}
 
 
@@ -614,12 +709,21 @@ func _run() -> void:
 	seed(run_seed)
 	Engine.max_fps = 60
 	Input.use_accumulated_input = false
+	runtime_manifest_before = _runtime_manifest()
+	review_tool_hash_before = FileAccess.get_sha256(get_script().resource_path)
 	if DisplayServer.get_name() != "headless":
 		DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, true)
 	game = load("res://scenes/main.tscn").instantiate()
 	root.add_child(game)
 	await process_frame
+	if not fast_mode and DisplayServer.get_name() != "headless":
+		# Match an actual menu presentation before Enter; this permits the
+		# production showcase to render its assets before combat timing starts.
+		await RenderingServer.frame_post_draw
 	game.test_mode = true
+	# Menu preparation may create cosmetic particles; reset the combat seed
+	# after it so those draws do not consume the replay's gameplay sequence.
+	seed(run_seed)
 	if not _has_property(game, "route_duration"):
 		push_error("Normal combat replay requires the production route_duration property.")
 		game.free()
@@ -628,9 +732,12 @@ func _run() -> void:
 	game.route_duration = route_seconds
 	game.practice = false
 	game.training = false
+	observes_sections = _has_property(game,"route_section")
+	observes_blasts = _has_property(game,"blasts")
 	DisplayServer.window_set_title("SHIFT CUT - normal combat - " + run_label)
 	_send_key(KEY_ENTER, true)
 	_send_key(KEY_ENTER, false)
+	_observe_route_section()
 	await process_frame
 	# Synthetic relative input does not require OS pointer capture or native focus.
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -653,6 +760,7 @@ func _run() -> void:
 			var delta := maxf(float(now - last_wall_usec) / 1000000.0, 0.001)
 			last_wall_usec = now
 			frame_times_ms.append(delta * 1000.0)
+			_record_long_frame(delta * 1000.0)
 			_control(delta)
 			# process_frame resumes before the nodes consume new mouse input.
 			# Measure the pose that was actually rendered, not the queued cursor
@@ -669,15 +777,22 @@ func _run() -> void:
 	var source_events: Array = game.get("combat_events") if _has_property(game, "combat_events") else []
 	var source_stats: Dictionary = game.get("combat_stats") if _has_property(game, "combat_stats") else {}
 	frame_times_ms.sort()
+	observed_cut_times_ms.sort()
 	grip_errors.sort()
 	blade_errors.sort()
 	var p95_frame_ms := frame_times_ms[int(floor(float(frame_times_ms.size() - 1) * 0.95))] if not frame_times_ms.is_empty() else 0.0
+	var runtime_manifest_after := _runtime_manifest()
+	var review_tool_hash_after := FileAccess.get_sha256(get_script().resource_path)
 	var source_hashes: Dictionary = {}
-	for path in ["res://scenes/main.tscn", "res://scripts/main.gd", "res://scripts/katana_view.gd", "res://scripts/voxel_enemy.gd", "res://scripts/voxel_debris.gd", "res://scripts/prototype_hud.gd", "res://scripts/prototype_audio.gd"]:
-		source_hashes[path] = FileAccess.get_sha256(path)
+	for path in REVIEW_SOURCE_PATHS:
+		source_hashes[path] = runtime_manifest_after[path].raw_sha256
 	output = {
 		"grip_observation_phase": "pre_manual_update" if fast_mode else "frame_post_draw",
 		"source_hashes": source_hashes,
+		"runtime_manifest_before": runtime_manifest_before, "runtime_manifest_after": runtime_manifest_after,
+		"sources_unchanged": runtime_manifest_before == runtime_manifest_after,
+		"review_tool_sha256_before":review_tool_hash_before,"review_tool_sha256_after":review_tool_hash_after,"review_tool_unchanged":review_tool_hash_before == review_tool_hash_after,
+		"manifest_scope":"Raw source hashes when available; exported PCKs use remapped compiled-resource hashes. Compiled bytes are not claimed byte-equal to GDScript source.",
 		"label": run_label, "policy": policy, "mode": "fast-screening" if fast_mode else "real-time",
 		"seed": run_seed, "parry_decisions": parry_decisions, "attack_decisions": attack_decisions,
 		"route_duration": route_seconds, "outcome": game.state, "controller_time": clock,
@@ -686,14 +801,28 @@ func _run() -> void:
 		"practice": game.practice, "training": game.training, "forbidden_mode_seen": forbidden_mode_seen,
 		"timed_out": timed_out, "inputs": input_counts, "enemy_types_seen": types_seen.keys(),
 		"actions_seen": actions_seen, "action_transitions": transitions, "damage_samples": damage_samples,
+		"section_transitions": section_transitions, "long_frames": long_frames,
 		"combat_stats": source_stats, "combat_events": source_events,
 		"speed_min": min_speed, "speed_max": max_speed, "sampled_frame_p95_ms": p95_frame_ms,
+		"sampled_frame_count": frame_times_ms.size(),
+		"sampled_frame_p50_ms": frame_times_ms[frame_times_ms.size() / 2] if not frame_times_ms.is_empty() else 0.0,
+		"sampled_frames_over_25ms": _slow_frame_count(25.0),
+		"sampled_frames_over_50ms": _slow_frame_count(50.0),
+		"sampled_frames_over_100ms": _slow_frame_count(100.0),
+		"sampled_frame_p99_ms": frame_times_ms[int(float(frame_times_ms.size()-1)*0.99)] if not frame_times_ms.is_empty() else 0.0,
+		"sampled_frame_max_ms": frame_times_ms[-1] if not frame_times_ms.is_empty() else 0.0,
+		"observed_cut_time_max_ms": observed_cut_times_ms[-1] if not observed_cut_times_ms.is_empty() else 0.0,
+		"observed_cut_time_p95_ms": observed_cut_times_ms[int(float(observed_cut_times_ms.size()-1)*0.95)] if not observed_cut_times_ms.is_empty() else 0.0,
+		"cut_timing_scope": "Latest successful cut per enemy per observed frame; may omit earlier cuts in that same frame. CPU function timing, not GPU time.",
 		"fragments_spawned_seen": fragments_spawned_seen, "cut_chips_seen": chip_ids_seen.size(), "max_live_fragments": max_live_fragments, "largest_fragment_cells_seen": largest_fragment_cells_seen,
 		"max_live_cut_particles": max_live_cut_particles, "cut_particle_records": cut_particle_records,
 		"sever_material_observations": sever_samples, "fragment_records": fragment_records.values(), "dead_root_motion_records": dead_motion_records.values(), "first_sever_fragment_motion_samples": fragment_motion_samples,
 		"grip_error_max_px": grip_errors[-1] if not grip_errors.is_empty() else -1.0, "blade_error_max_px": blade_errors[-1] if not blade_errors.is_empty() else -1.0,
 		"grip_error_p95_px": grip_errors[int(float(grip_errors.size() - 1) * 0.95)] if not grip_errors.is_empty() else -1.0,
 		"grip_samples": grip_samples, "capture_timing": capture_timing,
+		"capture_png_writes_deferred": buffer_captures,
+		"capture_readback_ms": capture_readback_ms,
+		"frame_timing_scope":"Start-to-start process_frame intervals include game/controller/observation work, screenshots' Image readback, and PNG writes unless deferred. Long-frame context is sampled at interval end before the next controller input; it identifies nearby activity, not a proved cause.",
 		"single_contact_motion_samples": contact_motion_samples,
 		"last_cut_path": _point_pairs(game.blade_path),
 		"screenshots": screenshots_taken.keys(),
@@ -704,9 +833,23 @@ func _run() -> void:
 	report.close()
 	print("NORMAL COMBAT REPLAY: ", JSON.stringify({"label":run_label,"outcome":game.state,"health":game.health,"kills":game.kills,"time":clock,"boss_cycles":boss_strikes_seen,"stats":source_stats,"forbidden":forbidden_mode_seen,"timeout":timed_out}))
 	var succeeded: bool = game.state == "won" and not forbidden_mode_seen and not timed_out
+	if fast_mode:
+		game.audio.set_runner_motion(0.0, 0.0, false, 0.0)
+		await create_timer(1.5).timeout
+	for capture in buffered_captures:
+		capture.image.save_png(capture.path)
+	buffered_captures.clear()
 	game.free()
 	await create_timer(0.2).timeout
 	quit(0 if succeeded else 1)
+
+
+func _slow_frame_count(threshold: float) -> int:
+	var count := 0
+	for interval in frame_times_ms:
+		if interval > threshold:
+			count += 1
+	return count
 
 
 func _point_pairs(points: PackedVector2Array) -> Array:

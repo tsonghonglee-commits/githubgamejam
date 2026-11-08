@@ -213,12 +213,23 @@ func _run() -> void:
 	game.test_mode = true
 	game.set_process(false)
 	game.sword.set_process(false)
+	# Keep historical package review coordinates while locating the rebuilt
+	# fine slasher by its real hand/plate/waist anatomy in metres.
+	var probe = game._spawn_enemy("normal", 1, -9.0)
+	var fine_normal: bool = float(probe._cell) < 0.075
+	if probe.has_method("set_action"):
+		probe.set_action("recover", 1.0)
+	var normal_arm: Vector3 = probe._part_pose(1) * Vector3(-0.725, 1.475, 0.275) if fine_normal else Vector3(0.54, 1.48, 0)
+	var normal_armor: Vector3 = probe._part_pose(0) * Vector3(0.225, 1.975, 0.35) if fine_normal else Vector3(0.28, 1.48, 0)
+	var normal_waist: Vector3 = probe._part_pose(0) * Vector3(-0.9, 1.425, 0.025) if fine_normal else Vector3(-0.9, 1.27, 0)
+	game.enemies.erase(probe)
+	probe.free()
 	await _case("same-grip-18px", Vector2(640,540), [Vector2(18,0)])
 	await _case("same-grip-180px", Vector2(550,540), [Vector2(180,0)])
 	await _case("same-grip-curve", Vector2(560,540), [Vector2(35,-10),Vector2(35,10),Vector2(-70,0)])
-	await _case("aimed-arm-skim", Vector2.ZERO, [Vector2(5,0)], Vector3(0.54,1.48,0))
-	await _case("aimed-armor-18px", Vector2.ZERO, [Vector2(18,0)], Vector3(0.28,1.48,0))
-	await _case("aimed-waist", Vector2.ZERO, [Vector2(92,0)], Vector3(-0.9,1.27,0))
+	await _case("aimed-arm-skim", Vector2.ZERO, [Vector2(5,0)], normal_arm)
+	await _case("aimed-armor-18px", Vector2.ZERO, [Vector2(18,0)], normal_armor)
+	await _case("aimed-waist", Vector2.ZERO, [Vector2(92,0)], normal_waist)
 	if heavy_enabled:
 		for kind in ["tank", "boss"]:
 			for gear in [1, 4]:

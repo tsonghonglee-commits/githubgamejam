@@ -177,7 +177,7 @@ func _draw_telemetry() -> void:
 	var duration := maxf(float(_snapshot.get("duration", 180.0)), 1.0)
 	var elapsed := float(_snapshot.get("time", 0.0))
 	var progress := clampf(elapsed / duration, 0.0, 1.0)
-	_text_center(Vector2(640, 40), "CUTTING LAB / FREE SLICING" if bool(_snapshot.get("training", false)) else ("CORE APPROACH" if bool(_snapshot.get("boss", false)) else "INDUSTRIAL SECTOR  /  01"), 13, MUTED)
+	_text_center(Vector2(640, 40), "CUTTING LAB / FREE SLICING" if bool(_snapshot.get("training", false)) else ("CORE APPROACH" if bool(_snapshot.get("boss", false)) else str(_snapshot.get("section_name","ASSEMBLY LINE / 01"))), 13, MUTED)
 	draw_rect(Rect2(480, 53, 320, 3), Color(0.19, 0.27, 0.29))
 	draw_rect(Rect2(480, 53, 320 * progress, 3), AMBER if bool(_snapshot.get("boss", false)) else CYAN)
 	_text_center(Vector2(640, 74), "%02d:%02d / %02d:%02d" % [int(elapsed) / 60, int(elapsed) % 60, int(duration) / 60, int(duration) % 60], 11, MUTED)

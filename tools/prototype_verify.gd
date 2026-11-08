@@ -4,6 +4,11 @@ extends SceneTree
 var failures: int = 0
 var checks: int = 0
 var game
+var normal_precision_aims := {
+	"arm": Vector3(0.54, 1.48, -9.0),
+	"chest": Vector3(0.28, 1.48, -9.0),
+	"waist": Vector3(-0.9, 1.27, -9.0),
+}
 
 
 func _initialize() -> void:
@@ -29,6 +34,66 @@ func clear_targets() -> void:
 
 func cut_right_hand(enemy) -> Dictionary:
 	# Aim at the visible hand after its current arm pose, rather than its rest grid.
+	if enemy.enemy_kind == "normal" and float(enemy._cell) < 0.075:
+		# The rebuilt slasher is authored in metres at 5cm resolution. Its hand
+		# is no longer old grid rows 12..14; cross its actual wrist instead of
+		# slicing vertically down only the middle of a multi-cell palm.
+		var low := Vector3(INF, INF, INF)
+		var high := Vector3(-INF, -INF, -INF)
+		for index in range(enemy._voxels.size()):
+			if enemy._voxels[index] == 0 or enemy._part_for_index(index) != 2:
+				continue
+			var coordinate: Vector3i = enemy._coords(index)
+			var local: Vector3 = enemy._point(coordinate.x, coordinate.y, coordinate.z)
+			if local.y >= 1.14 and local.y <= 1.39 and local.x > 0.49 and local.z > 0.10:
+				low = low.min(local)
+				high = high.max(local)
+		if not low.is_finite() or not high.is_finite():
+			return {"removed": 0, "killed": false, "fixture_error": "normal hand region contains no cells"}
+		var wrist_y: float = high.y + float(enemy._cell) * 0.5
+		var middle_z: float = (low.z + high.z) * 0.5
+		var pose: Transform3D = enemy._part_pose(2)
+		var from: Vector2 = game.camera.unproject_position(enemy.to_global(pose * Vector3(low.x - 0.08, wrist_y, middle_z)))
+		var to: Vector2 = game.camera.unproject_position(enemy.to_global(pose * Vector3(high.x + 0.08, wrist_y, middle_z)))
+		return enemy.cut_screen(game.camera, from, to, 4.0)
+	if enemy.enemy_kind in ["tank", "ranged", "boss"] and int(enemy.PART_COUNT) > 3:
+		# Rebuilt models are authored in metres, with independent leg groups.
+		# Cross the visible wrist above the actual palm, not obsolete grid rows.
+		var palm_low := 1.02 if enemy.enemy_kind == "tank" else (1.92 if enemy.enemy_kind == "boss" else 1.70)
+		var palm_high := 1.38 if enemy.enemy_kind == "tank" else (2.38 if enemy.enemy_kind == "boss" else 1.98)
+		var palm_reach := 1.12 if enemy.enemy_kind == "tank" else (2.25 if enemy.enemy_kind == "boss" else 0.40)
+		var wrist_y := 1.42 if enemy.enemy_kind == "tank" else (2.45 if enemy.enemy_kind == "boss" else 2.00)
+		var palm_low_point := Vector3(INF,INF,INF)
+		var palm_high_point := Vector3(-INF,-INF,-INF)
+		for index in enemy._live_indices:
+			var point: Vector3 = enemy._cell_points[index]
+			if enemy._voxels[index] != 0 and enemy._part_ids[index] == 2 and point.y >= palm_low and point.y <= palm_high and point.x > palm_reach and point.z > 0.04:
+				palm_low_point = palm_low_point.min(point)
+				palm_high_point = palm_high_point.max(point)
+		if not palm_low_point.is_finite():
+			return {"removed":0,"killed":false,"fixture_error":"new right palm contains no real material"}
+		var pose: Transform3D = enemy._part_pose(2)
+		var middle_z := (palm_low_point.z+palm_high_point.z)*0.5
+		var from: Vector2 = game.camera.unproject_position(enemy.to_global(pose*Vector3(palm_low_point.x-0.12,wrist_y,middle_z)))
+		var to: Vector2 = game.camera.unproject_position(enemy.to_global(pose*Vector3(palm_high_point.x+0.12,wrist_y,middle_z)))
+		var removed := 0
+		var passes := 0
+		# Thick wrists are actually layered material. Repeat the same wrist cut
+		# while it still removes material; no HP, forced sever or fixed immunity.
+		for pass_index in range(enemy._dimensions.z):
+			var result: Dictionary = enemy.cut_screen(game.camera,from,to,4.0)
+			removed += int(result.removed)
+			passes += 1
+			var palm_remains := false
+			for index in enemy._live_indices:
+				var point: Vector3 = enemy._cell_points[index]
+				if enemy._voxels[index] != 0 and enemy._part_ids[index] == 2 and point.y >= palm_low and point.y <= palm_high and point.x > palm_reach and point.z > 0.04:
+					palm_remains = true
+					break
+			if not palm_remains or int(result.removed) == 0 or enemy.dead:
+				break
+		print("WRIST MATERIAL CUT: ",enemy.enemy_kind," passes=",passes," removed=",removed," remaining=",enemy.get_remaining_voxel_count())
+		return {"removed":removed,"killed":enemy.dead,"passes":passes}
 	var left: float = INF
 	var right: float = -INF
 	var top: float = INF
@@ -44,8 +109,28 @@ func cut_right_hand(enemy) -> Dictionary:
 		right = maxf(right, point.x)
 		top = minf(top, point.y)
 		bottom = maxf(bottom, point.y)
+	if not is_finite(left) or not is_finite(right):
+		return {"removed": 0, "killed": false, "fixture_error": "hand region contains no cells"}
 	var middle_x: float = (left + right) * 0.5
 	return enemy.cut_screen(game.camera, Vector2(middle_x, top), Vector2(middle_x, bottom), 4.0)
+
+
+func configure_normal_fixture_anatomy() -> void:
+	var probe = game._spawn_enemy("normal", 1, -9.0)
+	probe.position.x = 0.0
+	probe.set_action("recover", 1.0)
+	if float(probe._cell) < 0.075:
+		normal_precision_aims = {
+			# The right arm crosses the chest in its new ready pose. The left
+			# outer forearm gives an isolated noncritical skim; apply its actual
+			# posed transform rather than aiming at an obsolete standing hand.
+			"arm": probe.to_global(probe._part_pose(1) * Vector3(-0.725, 1.475, 0.275)),
+			"chest": probe.to_global(probe._part_pose(0) * Vector3(0.225, 1.975, 0.35)),
+			"waist": probe.to_global(probe._part_pose(0) * Vector3(-0.9, 1.425, 0.025)),
+		}
+	print("NORMAL FIXTURE ANATOMY: cell=", probe._cell, " points=", normal_precision_aims)
+	game.enemies.erase(probe)
+	probe.free()
 
 
 func pointer_motion(relative: Vector2) -> void:
@@ -157,8 +242,10 @@ func verify_armored_light_contacts() -> void:
 				records.append({"kind": kind, "gear": gear_value, "style": style, "removed": removed, "dead": target.dead, "kills": game.kills, "remaining": target.get_remaining_voxel_count()})
 			expect(all_contacted and contacts_survive, kind + " gear " + str(gear_value) + " takes real local material damage from all twelve parsed first light attacks without an instant kill")
 			await process_frame
-	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("res://builds/armor-review-v072"))
-	var report := FileAccess.open("res://builds/armor-review-v072/parsed-first-light.json", FileAccess.WRITE)
+	var version_label: String = str(ProjectSettings.get_setting("application/config/version", "development")).validate_filename()
+	var report_dir := "res://builds/verification/".path_join(version_label)
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(report_dir))
+	var report := FileAccess.open(report_dir.path_join("parsed-first-light.json"), FileAccess.WRITE)
 	if report != null:
 		report.store_string(JSON.stringify({"scope": "Stationary fresh heavy targets, real parsed left-button attacks; does not certify normal play or require a fixed number of hits.", "rows": records}, "\t"))
 		report.close()
@@ -341,7 +428,7 @@ func verify_light_styles_and_hilt_direction() -> void:
 
 
 func verify_cut_voxel_particles() -> void:
-	prepare_precision_input(Vector3(-0.9, 1.27, -9.0))
+	prepare_precision_input(normal_precision_aims.waist)
 	var enemy = precision_target()
 	pointer_motion(Vector2(92.0 / 1.05, 0))
 	step_input(0.016)
@@ -605,6 +692,7 @@ func _run() -> void:
 	await process_frame
 	game.set_process(false)
 	game.test_mode = true
+	configure_normal_fixture_anatomy()
 	game.start_game()
 	expect(game.state == "playing" and game.health == 5, "start with five health slots")
 	game.shift_down = true
@@ -690,10 +778,11 @@ func _run() -> void:
 	var start_z: float = enemy.position.z
 	game._spawn_projectile(Vector3(0, 1.7, -20), "bolt")
 	var projectile_z: float = game.projectiles[0].node.position.z
+	var slow_shot_velocity: Vector3 = game.projectiles[0].velocity
 	game._process(0.1)
 	expect(is_equal_approx(game.elapsed, 0.022), "slow slash scales world clock to 22 percent")
 	expect(is_equal_approx(game.speed, 47.0), "slow slash spends speed using actual elapsed time")
-	expect(enemy.position.z - start_z < 2.0 and game.projectiles[0].node.position.z - projectile_z < 1.0, "enemies and projectiles share slow world time")
+	expect(is_equal_approx(enemy.position.z-start_z,(game.speed+game.ENEMY_RUN_SPEED)*0.022) and is_equal_approx(game.projectiles[0].node.position.z-projectile_z,slow_shot_velocity.z*0.022), "enemies and faster physical projectiles share the same slow world delta")
 	game._pause_game()
 	var paused_elapsed: float = game.elapsed
 	game._process(0.2)
@@ -706,6 +795,9 @@ func _run() -> void:
 	enemy.position.x = 0.0
 	var arm_start: Vector2 = game.camera.unproject_position(enemy.to_global(Vector3(0.6, 1.32, 0.0)))
 	var arm_end: Vector2 = game.camera.unproject_position(enemy.to_global(Vector3(0.6, 1.65, 0.0)))
+	if float(enemy._cell) < 0.075:
+		arm_start = game.camera.unproject_position(enemy.to_global(enemy._part_pose(1) * Vector3(-0.63, 1.36, 0.20)))
+		arm_end = game.camera.unproject_position(enemy.to_global(enemy._part_pose(1) * Vector3(-0.63, 1.60, 0.15)))
 	var arm_result: Dictionary = enemy.cut_screen(game.camera, arm_start, arm_end, 1.0)
 	expect(int(arm_result.removed) > 0 and not enemy.dead, "noncritical arm damage does not count as a kill")
 	clear_targets()
@@ -767,11 +859,13 @@ func _run() -> void:
 		var removed: int = 0
 		var material_before: int = enemy.get_remaining_voxel_count()
 		var maximum_usec: int = 0
-		for cut_index in range(6):
+		# A larger authored depth can require more real layers than the old
+		# six-pass fixture. Bound work by the grid depth and require progress.
+		for cut_index in range(enemy._dimensions.z + 1):
 			var result: Dictionary = enemy.cut_screen(game.camera, cut_start, cut_end, 2.15)
 			removed += int(result.removed)
 			maximum_usec = maxi(maximum_usec, enemy.last_cut_usec)
-			if enemy.dead:
+			if enemy.dead or int(result.removed) == 0:
 				break
 		expect(removed > 0 and enemy.cut_count > 0, kind + " removes real voxel material")
 		expect(enemy.dead, kind + " dies from actual core/structural severing")
@@ -919,7 +1013,7 @@ func _run() -> void:
 	game.sword._process(0.4)
 	expect(game.sword.get_blade_screen_direction().dot(retained_axis) > 0.999 and game.sword.get_grip_screen_position().distance_to(game.slash_cursor) < 1.0, "stopped grip keeps its physical blade direction and position without recentering")
 	clear_targets()
-	prepare_precision_input(Vector3(0.54, 1.48, -9.0))
+	prepare_precision_input(normal_precision_aims.arm)
 	var precision_enemy = precision_target()
 	var material_before: int = precision_enemy.get_remaining_voxel_count()
 	pointer_motion(Vector2(5.0 / 1.05, 0))
@@ -927,24 +1021,43 @@ func _run() -> void:
 	var material_after: int = precision_enemy.get_remaining_voxel_count()
 	var skim_particles: Dictionary = precision_enemy.get_cut_particle_debug_state()
 	expect(material_after < material_before and not precision_enemy.dead and float(material_after) / float(material_before) >= 0.90 and skim_particles.get("last_source_kind", "") == "body" and int(skim_particles.get("emitted_sever", 0)) == 0, "parsed arm-edge skim damages only the contacted limb, stays alive and never emits a sever burst")
-	prepare_precision_input(Vector3(0.28, 1.48, -9.0))
+	prepare_precision_input(normal_precision_aims.chest)
 	precision_enemy = precision_target()
 	material_before = precision_enemy.get_remaining_voxel_count()
 	pointer_motion(Vector2(18.0 / 1.05, 0))
 	game._process(0.016)
 	material_after = precision_enemy.get_remaining_voxel_count()
 	expect(material_after < material_before and not precision_enemy.dead and float(material_after) / float(material_before) >= 0.85, "parsed short armor stroke makes a thin wound instead of wiping half a torso")
-	prepare_precision_input(Vector3(-0.9, 1.27, -9.0))
+	prepare_precision_input(normal_precision_aims.waist)
 	precision_enemy = precision_target()
 	material_before = precision_enemy.get_remaining_voxel_count()
 	pointer_motion(Vector2(92.0 / 1.05, 0))
 	game._process(0.016)
 	material_after = precision_enemy.get_remaining_voxel_count()
 	var large_chunks: int = 0
+	var upper_chunks := 0
+	var lower_limb_chunks := 0
+	var lower_material_volume := 0.0
+	var waist_y: float = normal_precision_aims.waist.y
 	for piece in precision_enemy.get_children():
-		if piece.get_meta("voxel_piece", false) and not piece.is_queued_for_deletion() and piece.get_voxel_count() >= 100:
+		# Preserve the original 100 * (0.1m)^3 physical minimum after changing
+		# the normal's voxel resolution; 100 fine cells would be a tiny plate.
+		if piece.get_meta("voxel_piece", false) and not piece.is_queued_for_deletion() and float(piece.get_voxel_count()) * pow(float(piece.cell_size), 3.0) >= 0.1 - 0.000001:
 			large_chunks += 1
-	expect(precision_enemy.dead and material_after < material_before and float(material_after) / float(material_before) >= 0.65 and large_chunks >= 2, "aimed parsed waist cut severs the real connection while preserving large upper and lower chunks")
+		if piece.get_meta("voxel_piece",false) and not piece.is_queued_for_deletion():
+			var volume := float(piece.get_voxel_count())*pow(float(piece.cell_size),3.0)
+			if piece.get_aim_point().y < waist_y:
+				lower_material_volume += volume
+				if volume >= 0.025-0.000001:
+					lower_limb_chunks += 1
+			elif volume >= 0.1-0.000001:
+				upper_chunks += 1
+	# Nine independently posed parts naturally separate the two legs, shins
+	# and feet. Require a substantial torso and multiple substantial lower
+	# limb chunks, plus the original lower-body aggregate volume, not crumbs.
+	var large_anatomy_retained := large_chunks >= 2 if int(precision_enemy.PART_COUNT) <= 3 else (upper_chunks >= 1 and lower_limb_chunks >= 2 and lower_material_volume >= 0.1-0.000001)
+	print("WAIST MATERIAL RETAINED: ",JSON.stringify({"before":material_before,"after":material_after,"dead":precision_enemy.dead,"upper_chunks":upper_chunks,"lower_limb_chunks":lower_limb_chunks,"lower_volume":lower_material_volume}))
+	expect(precision_enemy.dead and material_after < material_before and float(material_after) / float(material_before) >= 0.65 and large_anatomy_retained, "aimed parsed waist cut severs the real connection while preserving substantial upper and independently posed lower chunks")
 	game.training = false
 	clear_targets()
 	for exit_kind in ["release", "parry", "exhaustion"]:

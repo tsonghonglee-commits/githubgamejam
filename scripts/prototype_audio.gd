@@ -2,8 +2,8 @@ class_name PrototypeAudio
 extends Node
 
 const SAMPLE_RATE := 44100
-const VOICES := 22
-const EVENT_NAMES := ["slash", "unsheathe", "blade_whoosh", "sheathe", "guard_raise", "guard_release", "hit", "kill", "parry", "perfect", "hurt", "gear", "start", "win", "lose", "windup", "enemy_swing", "ranged_charge", "ranged_fire", "boss_charge", "parry_clash"]
+const VOICES := 24
+const EVENT_NAMES := ["slash", "unsheathe", "blade_whoosh", "sheathe", "guard_raise", "guard_release", "hit", "kill", "parry", "perfect", "hurt", "gear", "start", "win", "lose", "windup", "enemy_swing", "ranged_charge", "ranged_fire", "boss_charge", "parry_clash", "explosion", "explosion_reflected"]
 
 var _sounds: Dictionary = {}
 var _players: Array[AudioStreamPlayer] = []
@@ -91,6 +91,7 @@ func play_event(kind: String, intensity: float = 1.0) -> void:
 		"windup", "ranged_charge", "boss_charge": minimum_gap = 90
 		"enemy_swing", "ranged_fire": minimum_gap = 35
 		"parry_clash": minimum_gap = 35
+		"explosion", "explosion_reflected": minimum_gap = 40
 	if now - int(_last_event_msec.get(kind, -100000)) < minimum_gap:
 		return
 	_last_event_msec[kind] = now
@@ -99,7 +100,10 @@ func play_event(kind: String, intensity: float = 1.0) -> void:
 	var pool := Vector2i(20, 2)
 	match kind:
 		"hit", "hurt": pool = Vector2i(0, 4)
-		"kill": pool = Vector2i(4, 3)
+		"kill", "explosion": pool = Vector2i(4, 3)
+		# Real reflected impacts keep two finite voices, so simultaneous sever
+		# callbacks cannot steal the low pressure / tearing-metal blast tail.
+		"explosion_reflected": pool = Vector2i(22, 2)
 		"parry", "perfect", "parry_clash": pool = Vector2i(7, 3)
 		"windup", "enemy_swing", "ranged_charge", "ranged_fire", "boss_charge": pool = Vector2i(10, 2)
 		"unsheathe", "sheathe", "guard_raise", "guard_release": pool = Vector2i(12, 3)
@@ -124,6 +128,9 @@ func play_event(kind: String, intensity: float = 1.0) -> void:
 		player.pitch_scale = 0.94 + intensity * 0.025 + variation
 	elif kind == "hit":
 		player.volume_db += 0.5
+	elif kind == "explosion_reflected":
+		player.volume_db += 2.0
+		player.pitch_scale = 0.92 + intensity * 0.025 + variation
 	elif kind in ["slash", "blade_whoosh"]:
 		player.volume_db -= 4.0 if intensity <= 0.55 else 2.0
 	elif kind in ["unsheathe", "sheathe", "guard_raise", "guard_release"]:
@@ -134,8 +141,8 @@ func play_event(kind: String, intensity: float = 1.0) -> void:
 	if kind in ["windup", "ranged_charge", "boss_charge"]:
 		player.volume_db -= 4.0
 		_runner_cue_duck = 0.26
-	if kind in ["hit", "kill", "parry_clash"]:
-		_contact_duck = 0.09
+	if kind in ["hit", "kill", "parry_clash", "explosion_reflected"]:
+		_contact_duck = 0.14 if kind == "explosion_reflected" else 0.09
 	if kind in ["kill", "parry_clash"]:
 		_strong_contact_frame = frame
 		for contact_voice in _players:
@@ -328,6 +335,8 @@ func _synthesize(kind: String) -> AudioStreamWAV:
 		"ranged_fire": duration = 0.12
 		"boss_charge": duration = 0.65
 		"parry_clash": duration = 0.32
+		"explosion": duration = 0.55
+		"explosion_reflected": duration = 0.72
 	_random.seed = int(kind.hash())
 	var count := int(duration * SAMPLE_RATE)
 	var bytes := PackedByteArray()
@@ -345,7 +354,7 @@ func _synthesize(kind: String) -> AudioStreamWAV:
 		var grit := noise - previous_noise
 		previous_noise = noise
 		var envelope := sin(minf(phase * 28.0, PI * 0.5)) * pow(1.0 - phase, 2.1)
-		if kind in ["slash", "blade_whoosh", "unsheathe", "sheathe", "guard_raise", "guard_release", "hit", "kill", "parry", "perfect", "parry_clash"]:
+		if kind in ["slash", "blade_whoosh", "unsheathe", "sheathe", "guard_raise", "guard_release", "hit", "kill", "parry", "perfect", "parry_clash", "explosion", "explosion_reflected"]:
 			# The transient and metallic/air tails already have independent envelopes.
 			# Only soften the sample boundary, rather than burying the initial contact.
 			envelope = minf(t / 0.0008, 1.0) * smoothstep(0.0, 0.026, duration - t)
@@ -414,6 +423,18 @@ func _synthesize(kind: String) -> AudioStreamWAV:
 				sample = (sin(TAU * (67.0 * t + 18.0 * t * t)) * 0.48 + smooth_noise * 0.22 + sin(TAU * (560.0 * t + 300.0 * t * t)) * 0.11) * throb * (0.35 + phase * 0.65)
 			"parry_clash":
 				sample = grit * exp(-t * 205.0) * 0.54 + sin(TAU * 1470.0 * t) * exp(-t * 17.0) * 0.32 + sin(TAU * 2311.0 * t) * exp(-t * 22.0) * 0.23 + sin(TAU * 3293.0 * t) * exp(-t * 29.0) * 0.15 + sin(TAU * 5123.0 * t) * exp(-t * 48.0) * 0.08 + sin(TAU * 154.0 * t) * exp(-t * 32.0) * 0.40
+			"explosion":
+				var pressure := sin(TAU*(48.0*t+1.3*(1.0-exp(-t*30.0))))*exp(-t*12.0)
+				var crack := noise*exp(-t*105.0)+air_noise*exp(-t*17.0)*0.7
+				var rubble := low_noise*exp(-t*7.0)*(0.65+0.35*sin(TAU*37.0*t))
+				sample = pressure*0.95+crack*0.9+rubble*0.8
+			"explosion_reflected":
+				var pressure := sin(TAU*(43.0*t+2.5*(1.0-exp(-t*34.0))))*exp(-t*8.0)
+				var crack := grit*exp(-t*155.0)*0.70+noise*exp(-t*74.0)*0.85
+				var tear := sin(TAU*(1730.0*t-820.0*t*t))*exp(-t*19.0)*0.30+sin(TAU*2917.0*t)*exp(-t*27.0)*0.14
+				var chips := exp(-pow((t-0.031)/0.007,2.0))+exp(-pow((t-0.067)/0.011,2.0))*0.76+exp(-pow((t-0.118)/0.015,2.0))*0.48
+				var rubble := low_noise*exp(-t*5.5)*(0.64+sin(TAU*29.0*t)*0.36)
+				sample = pressure*1.30+crack*1.20+tear+air_noise*(exp(-t*13.0)*0.55+chips*0.90)+rubble*1.05
 		var value := int(tanh(sample * envelope * 1.18) * 29000.0)
 		bytes.encode_s16(index * 2, value)
 	var stream := AudioStreamWAV.new()

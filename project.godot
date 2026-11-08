@@ -10,9 +10,9 @@ config_version=5
 
 [application]
 
-config/name="SHIFT - CUT | Voxel Blast v0.7.3"
+config/name="SHIFT - CUT | Foundry Reforged v0.9.5"
 config/description="First-person voxel slicing runner prototype."
-config/version="0.7.3"
+config/version="0.9.5"
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 config/icon="res://assets/icon.svg"
@@ -24,9 +24,7 @@ window/size/viewport_height=720
 window/size/mode=3
 window/size/window_width_override=1280
 window/size/window_height_override=720
-window/vsync/vsync_mode=1
 window/stretch/mode="canvas_items"
-window/handheld/orientation=0
 window/size/mode.android=3
 window/size/mode.ios=3
 
@@ -38,6 +36,6 @@ pointing/emulate_mouse_from_touch=false
 
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
-anti_aliasing/quality/msaa_3d=2
 textures/vram_compression/import_etc2_astc=true
+anti_aliasing/quality/msaa_3d=2
 environment/defaults/default_clear_color=Color(0.055, 0.047, 0.09, 1)

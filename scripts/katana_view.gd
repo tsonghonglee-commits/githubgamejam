@@ -14,6 +14,9 @@ const SLASH_RECOVERY_TIME := 0.23
 const SHEATHE_TIME := 0.44
 const SHEATHE_INSERT_TIME := 0.27
 const FOREARM := Vector3(0.025, 0.105, -0.285)
+const VIEWMODEL_Z_CLIP_SCALE := 0.9
+const HELD_VOXEL_CAPACITY := 96
+const HELD_VOXEL_EDGE_STATIONS: Array[Vector2] = [Vector2(0.025,-0.019),Vector2(0.20,-0.018),Vector2(0.47,-0.014),Vector2(0.65,-0.012),Vector2(0.76,-0.006),Vector2(0.86,0.0)]
 const LIGHT_SLASHES: Array[Dictionary] = [
 	{
 		"id": 0, "name": "右落袈裟", "swing": Vector2(205, 156), "duration": 0.28,
@@ -162,25 +165,49 @@ var _light_slash_times := Vector3(0.032, 0.076, 0.145)
 var _slash_contact_hold := 0.0
 var _slash_contact_drag_elapsed := 0.0
 var _held_turn_sign := 1.0
+var _held_voxel_visual: MultiMeshInstance3D
+var _held_voxels: MultiMesh
+var _held_voxel_phase := 0.0
+var _held_voxel_frozen := false
+var _held_voxel_world_scale := 1.0
+var _held_voxel_motion := 0.0
+var _held_voxel_contact := 0.0
+var _held_voxel_live := 0
+var _held_voxel_uploads := 0
+var _held_voxel_bounds := AABB()
+var _held_voxel_seeds := PackedVector3Array()
+var _held_voxel_cpu_poses: Array[Transform3D] = []
+var _held_voxel_cpu_colours := PackedColorArray()
 
 
 func _ready() -> void:
 	_camera = get_parent() as Camera3D
-	var steel := _material(Color(0.66, 0.75, 0.79), 0.85, 0.23)
-	var dark := _material(Color(0.022, 0.03, 0.039), 0.6, 0.32)
-	var sheath_material := _material(Color(0.31, 0.045, 0.035), 0.7, 0.27)
-	var glow := _material(Color(0.51, 0.97, 0.94), 0.35, 0.18, true)
+	var steel := _material(Color(0.59, 0.64, 0.66), 0.82, 0.25)
+	var dark := _material(Color(0.026, 0.034, 0.039), 0.12, 0.78)
+	var wrap := _material(Color(0.074, 0.088, 0.091), 0.08, 0.86)
+	var ivory := _material(Color(0.63, 0.62, 0.54), 0.18, 0.56)
+	var copper := _material(Color(0.48, 0.25, 0.105), 0.78, 0.31)
+	var sheath_material := _material(Color(0.13, 0.024, 0.020), 0.30, 0.41)
+	var glow := _material(Color(0.44, 0.83, 0.87), 0.35, 0.22, true)
 	_edge_material = glow
 	_scabbard = Node3D.new()
 	add_child(_scabbard)
 	_scabbard.position = Vector3(0.47, -0.26, -0.76)
 	_scabbard.rotation = Vector3(0.03, -0.12, 0.72)
 	_box(_scabbard, Vector3(0.075, 0.89, 0.042), Vector3(0, -0.455, 0), sheath_material)
-	_box(_scabbard, Vector3(0.081, 0.029, 0.049), Vector3(0, -0.024, 0), steel)
+	_box(_scabbard, Vector3(0.081, 0.029, 0.049), Vector3(0, -0.024, 0), ivory)
 	_box(_scabbard, Vector3(0.078, 0.022, 0.045), Vector3(0, -0.89, 0), steel)
 	_box(_scabbard, Vector3(0.013, 0.75, 0.003), Vector3(0.025, -0.445, 0.024), dark)
+	_box(_scabbard, Vector3(0.0025, 0.67, 0.0035), Vector3(-0.025, -0.45, 0.024), copper)
 	for index in range(3):
 		_box(_scabbard, Vector3(0.061, 0.014, 0.037), Vector3(0, -0.16 - index * 0.2, 0), dark)
+		_box(_scabbard, Vector3(0.014, 0.008, 0.002), Vector3(0.018, -0.16 - index * 0.2, 0.023), copper)
+	# Small flush fittings carry the same painted steel / copper family as the
+	# factory armour. They stay on the sheath, clear of the moving blade.
+	_box(_scabbard, Vector3(0.033, 0.003, 0.002), Vector3(0, -0.084, 0.022), ivory)
+	_box(_scabbard, Vector3(0.033, 0.003, 0.002), Vector3(0, -0.097, 0.022), ivory)
+	for at in [Vector3(-0.026, -0.025, 0.025), Vector3(0.026, -0.025, 0.025), Vector3(0.022, -0.884, 0.024)]:
+		_box(_scabbard, Vector3(0.004, 0.006, 0.002), at, dark)
 	_handle = Node3D.new()
 	_scabbard.add_child(_handle)
 	# One physical katana stays visible throughout drawing and sheathing. The
@@ -188,26 +215,27 @@ func _ready() -> void:
 	_handle.visible = false
 	_drawn = Node3D.new()
 	add_child(_drawn)
-	_make_grip(_drawn, -1.0, steel, dark, glow)
+	_make_grip(_drawn, -1.0, steel, dark, glow, wrap, ivory, copper)
 	var blade := MeshInstance3D.new()
 	blade.mesh = _blade_mesh()
-	_blade_face_material = _material(Color(0.43, 0.53, 0.58), 0.92, 0.26)
+	_blade_face_material = _material(Color(0.62, 0.67, 0.70), 0.78, 0.29)
+	_add_brushed_finish(_blade_face_material)
 	blade.set_surface_override_material(0, _blade_face_material)
-	blade.set_surface_override_material(1, _material(Color(0.78, 0.85, 0.86), 0.86, 0.14))
-	blade.set_surface_override_material(2, _material(Color(0.065, 0.10, 0.12), 0.72, 0.40))
+	blade.set_surface_override_material(1, _material(Color(0.84, 0.90, 0.93), 0.86, 0.17))
+	blade.set_surface_override_material(2, _material(Color(0.12, 0.15, 0.17), 0.84, 0.36))
 	blade.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_drawn.add_child(blade)
-	_edge_material = _material(Color(0.18, 0.57, 0.65), 0.75, 0.19, true)
+	_edge_material = _material(Color(0.35, 0.68, 0.75), 0.68, 0.23, true)
 	var edge := _box(_drawn, Vector3(0.0018, 0.72, 0.002), Vector3(-0.018, 0.36, 0), _edge_material)
 	edge.rotation.z = -0.018
 	# The short mark identifies the one contact point used by continuous cuts.
 	_box(_drawn, Vector3(0.043, 0.009, 0.015), ACTIVE_CUT_POINT, glow)
-	_box(_drawn, Vector3(0.012, 0.055, 0.019), Vector3(0, 0.048, 0), dark)
+	_box(_drawn, Vector3(0.012, 0.055, 0.019), Vector3(0, 0.048, 0), copper)
 	_drawn.transform = _dock_transform()
 	_trail = MeshInstance3D.new()
 	_trail.name = "BladeAfterimage"
 	_trail.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_trail_material = StandardMaterial3D.new()
+	_trail_material = _new_viewmodel_material()
 	_trail_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_trail_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_trail_material.vertex_color_use_as_albedo = true
@@ -218,7 +246,7 @@ func _ready() -> void:
 	_contact_flash = MeshInstance3D.new()
 	_contact_flash.name = "BladeContact"
 	_contact_flash.mesh = _contact_spark_mesh()
-	_flash_material = StandardMaterial3D.new()
+	_flash_material = _new_viewmodel_material()
 	_flash_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_flash_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_flash_material.cull_mode = BaseMaterial3D.CULL_DISABLED
@@ -229,13 +257,14 @@ func _ready() -> void:
 	_energy_arc = MeshInstance3D.new()
 	_energy_arc.name = "BladeIonFilaments"
 	_energy_arc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_energy_material = StandardMaterial3D.new()
+	_energy_material = _new_viewmodel_material()
 	_energy_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_energy_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_energy_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_energy_arc.material_override = _energy_material
 	_energy_arc.visible = false
 	add_child(_energy_arc)
+	_build_held_voxels()
 
 
 func set_pose(mode: String, progress: float = 0.0, stroke: Vector2 = Vector2.ZERO) -> void:
@@ -274,6 +303,9 @@ func set_pose(mode: String, progress: float = 0.0, stroke: Vector2 = Vector2.ZER
 	_mode = mode
 	_progress = clampf(progress, 0.0, 1.0)
 	_stroke = stroke.limit_length(1.0)
+	if mode != "held" and is_instance_valid(_held_voxel_visual):
+		_held_voxel_visual.visible = false
+		_held_voxels.visible_instance_count = 0
 
 
 func get_light_slash_count() -> int:
@@ -574,10 +606,11 @@ func _process(delta: float) -> void:
 		_drawn.transform = pose
 	# The broad steel face must remain readable during the very fast ordinary
 	# drive. Precision-mode lighting and its exact pose are left unchanged.
-	_blade_face_material.albedo_color = Color(0.64, 0.73, 0.77) if _mode == "slash" else Color(0.43, 0.53, 0.58)
-	_blade_face_material.metallic = 0.68 if _mode == "slash" else 0.92
+	# The same steel remains under the scene lighting in every mode. Its real
+	# face / bevel normals carry the highlight rather than a mode colour swap.
 	_update_blade_trail(real_delta, _mode == "sheathed")
 	_update_energy_arc(_mode == "sheathed")
+	_update_held_voxels(real_delta)
 	_edge_material.emission_energy_multiplier = 0.38 + _motion_energy * 0.16 + _contact_energy * 0.35
 	_contact_flash.visible = _contact_energy > 0.2 and _mode != "sheathed"
 	if _contact_flash.visible:
@@ -813,6 +846,144 @@ func _update_energy_arc(_resting: bool) -> void:
 	_energy_arc.visible = false
 
 
+func set_voxel_fx_simulation(frozen: bool, world_scale: float = 1.0) -> void:
+	# Only this cosmetic clock is gated. Cursor-owned sword geometry and input
+	# keep following their existing real-time paths during a contact stop.
+	_held_voxel_frozen = frozen
+	_held_voxel_world_scale = clampf(world_scale,0.0,1.0)
+
+
+func _build_held_voxels() -> void:
+	var cube := BoxMesh.new()
+	cube.size = Vector3.ONE
+	var arrays := cube.surface_get_arrays(0)
+	var normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
+	var colours := PackedColorArray()
+	var light_axis := Vector3(0.4,0.8,0.3).normalized()
+	for normal in normals:
+		var face := 0.52 + 0.48*absf(normal.dot(light_axis))
+		colours.append(Color(face,face,face,1.0))
+	arrays[Mesh.ARRAY_COLOR] = colours
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,arrays)
+	var material := _new_viewmodel_material()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.vertex_color_use_as_albedo = true
+	material.albedo_color = Color.WHITE
+	# Opaque hard faces retain real depth and the same first-person depth space
+	# as the steel. HDR heat comes through ALBEDO, including Compatibility.
+	material.no_depth_test = false
+	_held_voxels = MultiMesh.new()
+	_held_voxels.transform_format = MultiMesh.TRANSFORM_3D
+	_held_voxels.use_colors = true
+	_held_voxels.mesh = mesh
+	_held_voxels.instance_count = HELD_VOXEL_CAPACITY
+	_held_voxel_cpu_poses.resize(HELD_VOXEL_CAPACITY)
+	_held_voxel_cpu_colours.resize(HELD_VOXEL_CAPACITY)
+	_held_voxels.custom_aabb = AABB(Vector3(-0.18,0.035,-0.12),Vector3(0.24,0.83,0.24))
+	_held_voxel_visual = MultiMeshInstance3D.new()
+	_held_voxel_visual.name = "HeldBladeVoxels"
+	_held_voxel_visual.multimesh = _held_voxels
+	_held_voxel_visual.material_override = material
+	_held_voxel_visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_drawn.add_child(_held_voxel_visual)
+	for index in range(HELD_VOXEL_CAPACITY):
+		# Deterministic local seeds never consume the combat / debris RNG.
+		var number := float(index+1)
+		_held_voxel_seeds.append(Vector3(fposmod(sin(number*12.9898)*43758.5453,1.0),fposmod(sin(number*39.346)*18473.219,1.0),fposmod(sin(number*71.917)*29632.147,1.0)))
+	_write_held_voxels()
+	_held_voxel_visual.visible = false
+	_held_voxels.visible_instance_count = 0
+
+
+func _held_voxel_edge_x(y: float) -> float:
+	# Exact authored sharp-edge stations from _blade_mesh(), not a second
+	# cutting line. The voxels only decorate the outward side of that edge.
+	for index in range(HELD_VOXEL_EDGE_STATIONS.size()-1):
+		if y <= HELD_VOXEL_EDGE_STATIONS[index+1].x:
+			return lerpf(HELD_VOXEL_EDGE_STATIONS[index].y,HELD_VOXEL_EDGE_STATIONS[index+1].y,clampf((y-HELD_VOXEL_EDGE_STATIONS[index].x)/(HELD_VOXEL_EDGE_STATIONS[index+1].x-HELD_VOXEL_EDGE_STATIONS[index].x),0.0,1.0))
+	return 0.0
+
+
+func _update_held_voxels(real_delta: float) -> void:
+	if not is_instance_valid(_held_voxel_visual):
+		return
+	var active := _mode == "held"
+	_held_voxel_visual.visible = active
+	_held_voxels.visible_instance_count = HELD_VOXEL_CAPACITY if active else 0
+	if not active or _held_voxel_frozen or real_delta <= 0.0:
+		return
+	# Hand-controlled blade energy stays readable in slow motion at ~half
+	# real time (0.493 at world scale .22), while hit-stop / pause freezes it.
+	_held_voxel_phase += real_delta*(0.35+0.65*_held_voxel_world_scale)
+	_held_voxel_motion = clampf(_motion_energy,0.0,1.0)
+	_held_voxel_contact = clampf(_contact_energy/1.6,0.0,1.0)
+	_write_held_voxels()
+
+
+func _write_held_voxels() -> void:
+	var motion := _held_voxel_motion
+	var contact := _held_voxel_contact
+	var cool_white := Color(1.70,2.25,2.55)
+	var edge_blue := Color(1.10,1.90,2.35)
+	_held_voxel_live = 0
+	_held_voxel_bounds = AABB()
+	var cube := AABB(Vector3(-0.5,-0.5,-0.5),Vector3.ONE)
+	for index in range(HELD_VOXEL_CAPACITY):
+		var seed_value := _held_voxel_seeds[index]
+		var side := -1.0 if index%2 == 0 else 1.0
+		var position: Vector3
+		var dimensions: Vector3
+		var brightness := 1.0
+		if index < 24:
+			var phase := fposmod(_held_voxel_phase*(0.65+seed_value.x*0.35)+seed_value.y,1.0)
+			var y := lerpf(0.075,0.825,phase)
+			position = Vector3(_held_voxel_edge_x(y)-0.005,y,side*(0.012+sin(phase*PI)*0.005))
+			var size := (0.0055+seed_value.z*0.0025)*pow(sin(phase*PI),0.45)
+			dimensions = Vector3(size,size*1.8,size)
+			brightness = 0.75+sin(phase*PI)*0.25
+		else:
+			var heavy := index >= 72
+			var phase := fposmod(_held_voxel_phase*(1.8+seed_value.x*1.2)+seed_value.y,1.0)
+			var duty := (0.10+motion*0.24+contact*0.10) if heavy else (0.22+motion*0.21+contact*0.08)
+			var age := clampf(phase/duty,0.0,1.0)
+			var y := 0.09+seed_value.z*0.66+age*0.055
+			var spread := (0.035+motion*0.055) if heavy else (0.025+motion*0.040)
+			position = Vector3(_held_voxel_edge_x(y)-0.008-age*spread,y,side*(0.014+age*(0.025+motion*0.025)))
+			var size := ((0.010+seed_value.x*0.005) if heavy else (0.005+seed_value.x*0.006))*pow(maxf(sin(age*PI),0.0),0.6)
+			if phase >= duty:
+				size = 0.0
+			dimensions = Vector3(size*1.05,size*(1.35 if heavy else 1.0),size*0.85)
+			brightness = 1.0-age*0.55
+		# Keep the real highlit one-point contact and its immediate blade band
+		# unobscured. No particles occupy the grip, guard or beyond the real tip.
+		if absf(position.y-ACTIVE_CUT_POINT.y) < 0.040:
+			dimensions = Vector3.ZERO
+		var spin := Vector3(seed_value.x*TAU,seed_value.y*TAU,seed_value.z*TAU)+Vector3(1.1,1.7,2.3)*_held_voxel_phase
+		var pose := Transform3D(Basis.from_euler(spin).scaled(dimensions),position)
+		_held_voxels.set_instance_transform(index,pose)
+		_held_voxel_cpu_poses[index] = pose
+		var tint := (cool_white if index < 24 or index >= 72 else edge_blue)*brightness
+		tint.a = 1.0
+		_held_voxels.set_instance_color(index,tint)
+		_held_voxel_cpu_colours[index] = tint
+		if dimensions.length_squared() > 0.00000001:
+			var bounds: AABB = pose*cube
+			_held_voxel_bounds = bounds if _held_voxel_live == 0 else _held_voxel_bounds.merge(bounds)
+			_held_voxel_live += 1
+	_held_voxel_uploads += 1
+
+
+func get_held_voxel_fx_debug_state() -> Dictionary:
+	# Explicit submitted CPU pose-cache diagnostic only, never called each frame.
+	# Dummy/headless renderers do not retain MultiMesh.buffer; the cache records
+	# the same values sent to instance setters. This is not GPU readback proof.
+	var context := HashingContext.new()
+	context.start(HashingContext.HASH_SHA256)
+	context.update(var_to_bytes([_held_voxel_cpu_poses,_held_voxel_cpu_colours]))
+	return {"active":is_instance_valid(_held_voxel_visual) and _held_voxel_visual.visible,"phase":_held_voxel_phase,"frozen":_held_voxel_frozen,"world_scale":_held_voxel_world_scale,"simulation_rate":0.0 if _held_voxel_frozen else 0.35+0.65*_held_voxel_world_scale,"capacity":HELD_VOXEL_CAPACITY,"noncollapsed_instances":_held_voxel_live,"visible_instance_count":0 if _held_voxels == null else _held_voxels.visible_instance_count,"uploads":_held_voxel_uploads,"local_bounds_position":_held_voxel_bounds.position,"local_bounds_size":_held_voxel_bounds.size,"custom_aabb_position":_held_voxels.custom_aabb.position,"custom_aabb_size":_held_voxels.custom_aabb.size,"parent_is_drawn":is_instance_valid(_held_voxel_visual) and _held_voxel_visual.get_parent() == _drawn,"contact_center_exclusion_y":0.040,"contact_clearance_y":0.020,"viewmodel_depth_scale":VIEWMODEL_Z_CLIP_SCALE,"hash_source":"submitted_cpu_pose_colour_cache","cpu_instance_sha256":context.finish().hex_encode()}
+
+
 func _append_streak(surface: SurfaceTool, from: Vector3, to: Vector3, width: float, tint: Color) -> void:
 	var tangent := to - from
 	if tangent.length_squared() < 0.000001:
@@ -856,13 +1027,24 @@ func _update_blade_trail(real_delta: float, resting: bool) -> void:
 		_append_streak(surface, first.point, second.point, 0.0032 if _mode == "slash" else 0.0018, tint)
 	_trail.mesh = surface.commit()
 
-func _make_grip(parent: Node3D, direction: float, steel: StandardMaterial3D, dark: StandardMaterial3D, glow: StandardMaterial3D) -> void:
+func _make_grip(parent: Node3D, direction: float, steel: StandardMaterial3D, dark: StandardMaterial3D, glow: StandardMaterial3D, wrap: StandardMaterial3D, ivory: StandardMaterial3D, copper: StandardMaterial3D) -> void:
 	_box(parent, Vector3(0.098, 0.015, 0.05), Vector3.ZERO, steel)
+	# Keep the visible inlay face clear of the steel face. Coplanar outer
+	# faces at +/-0.0075 fought for depth as the resting sword moved.
+	_box(parent, Vector3(0.065, 0.002, 0.041), Vector3(0, direction * 0.0083, 0), ivory)
+	for side in [-1.0, 1.0]:
+		_box(parent, Vector3(0.004, 0.006, 0.002), Vector3(side * 0.038, 0, 0.0255), copper)
 	_box(parent, Vector3(0.037, 0.19, 0.028), Vector3(0, direction * 0.111, 0), dark)
 	for index in range(6):
-		var band := _box(parent, Vector3(0.043, 0.009, 0.032), Vector3(0, direction * (0.04 + index * 0.027), 0), steel)
+		var band_material: StandardMaterial3D = wrap
+		if index == 0:
+			band_material = copper
+		elif index == 5:
+			band_material = ivory
+		var band := _box(parent, Vector3(0.043, 0.009, 0.032), Vector3(0, direction * (0.04 + index * 0.027), 0), band_material)
 		band.rotation.z = 0.22
-	_box(parent, Vector3(0.046, 0.02, 0.036), Vector3(0, direction * 0.213, 0), steel)
+	_box(parent, Vector3(0.046, 0.02, 0.036), Vector3(0, direction * 0.213, 0), ivory)
+	_box(parent, Vector3(0.029, 0.002, 0.022), Vector3(0, direction * 0.221, 0), copper)
 	_box(parent, Vector3(0.018, 0.027, 0.004), Vector3(0, direction * 0.025, 0.028), glow)
 
 
@@ -891,7 +1073,7 @@ func _box(parent: Node3D, dimensions: Vector3, at: Vector3, material: StandardMa
 
 
 func _material(color: Color, metallic: float, roughness: float, luminous: bool = false) -> StandardMaterial3D:
-	var material := StandardMaterial3D.new()
+	var material := _new_viewmodel_material()
 	material.albedo_color = color
 	material.metallic = metallic
 	material.roughness = roughness
@@ -900,6 +1082,40 @@ func _material(color: Color, metallic: float, roughness: float, luminous: bool =
 		material.emission = color
 		material.emission_energy_multiplier = 1.5
 	return material
+
+
+func _new_viewmodel_material() -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	# A shared first-person depth scale removes Compatibility's close-range
+	# SSAO mottling. Keep PBR lighting and screen XY / CPU cut geometry intact;
+	# the blade and its short afterimage must use the same depth convention.
+	material.use_z_clip_scale = true
+	material.z_clip_scale = VIEWMODEL_Z_CLIP_SCALE
+	return material
+
+
+func _add_brushed_finish(material: StandardMaterial3D) -> void:
+	# Object-space triplanar normals work on the existing forged mesh without
+	# changing its vertices, contact centreline or blade UVs. The very shallow
+	# lengthwise grain is generated once, without an external texture asset.
+	var grain := FastNoiseLite.new()
+	grain.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	grain.seed = 731
+	grain.frequency = 0.055
+	grain.fractal_octaves = 2
+	var brushed := NoiseTexture2D.new()
+	brushed.width = 128
+	brushed.height = 128
+	brushed.seamless = true
+	brushed.as_normal_map = true
+	brushed.bump_strength = 0.15
+	brushed.noise = grain
+	material.normal_enabled = true
+	material.normal_texture = brushed
+	material.normal_scale = 0.09
+	material.uv1_triplanar = true
+	material.uv1_triplanar_sharpness = 8.0
+	material.uv1_scale = Vector3(36.0, 0.7, 36.0)
 
 
 func _blade_mesh() -> ArrayMesh:
