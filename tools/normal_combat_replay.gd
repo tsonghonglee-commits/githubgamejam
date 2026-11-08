@@ -734,9 +734,18 @@ func _run() -> void:
 	game.training = false
 	observes_sections = _has_property(game,"route_section")
 	observes_blasts = _has_property(game,"blasts")
-	DisplayServer.window_set_title("SHIFT CUT - normal combat - " + run_label)
+	DisplayServer.window_set_title("Slay the highway / 杀路 - normal combat - " + run_label)
 	_send_key(KEY_ENTER, true)
 	_send_key(KEY_ENTER, false)
+	# Enter still follows the real menu action. A sliceable button now presents
+	# its split before dispatch, and warm-up may queue the same action, so wait
+	# for the production transition instead of assuming it fits in one frame.
+	var menu_wait_started := Time.get_ticks_usec()
+	while game.state == "menu" and Time.get_ticks_usec()-menu_wait_started < 5000000:
+		await process_frame
+	if game.state == "menu":
+		timed_out = true
+		push_error("Normal combat replay menu action did not start within five real seconds.")
 	_observe_route_section()
 	await process_frame
 	# Synthetic relative input does not require OS pointer capture or native focus.

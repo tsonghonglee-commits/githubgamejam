@@ -28,6 +28,7 @@ const ROAD_LOOP_LENGTH: float = ROAD_TILE_COUNT * ROAD_TILE_LENGTH
 const LONG_PRESS: float = 0.13
 const SLOW_SCALE: float = 0.22
 const LANES: Array[float] = [-3.0, -1.0, 1.0, 3.0]
+const UI_PREFERENCES_FILE := "user://ui_preferences.cfg"
 
 @export var route_duration: float = ROUTE_DURATION
 
@@ -126,22 +127,33 @@ var forge_lights: Array[SpotLight3D] = []
 var menu_showcase: Node3D
 var menu_prepared := true
 var start_when_menu_prepared := false
+var ui_settings := {"volume":1.0,"fullscreen":true,"vsync":true,"msaa":true}
+var ui_settings_path := UI_PREFERENCES_FILE
+var ui_quit_requested := false
+var ui_quit_count := 0
+var _ui_preferences_enabled := true
+var _ui_settings_dirty := false
+var _ui_settings_save_delay := 0.0
+var _ui_pointer_capture_until_release := false
 
 
 func _ready() -> void:
-	test_mode = "--verify-prototype" in OS.get_cmdline_user_args()
+	test_mode = "--verify-prototype" in OS.get_cmdline_user_args() or "--verify-ui" in OS.get_cmdline_user_args()
+	_ui_preferences_enabled = ui_settings_path != UI_PREFERENCES_FILE or (not test_mode and DisplayServer.get_name() != "headless" and not "--ui-test-no-persist" in OS.get_cmdline_user_args())
 	touch_mode = is_mobile_input_enabled()
 	get_tree().quit_on_go_back = false
 	if OS.has_feature("android") or OS.has_feature("ios"):
 		Engine.max_fps = 60
 	_build_world()
 	_build_interface()
+	sword.visible = false
+	_load_ui_settings()
 	ProjectileScript.prewarm()
 	EnemyScript.prewarm_normal_model()
 	EnemyScript.prewarm_models(["tank", "ranged", "boss", "drone", "missile_drone", "barrier", "beam"])
 	_build_menu_showcase()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	print("SHIFT//CUT v0.9.5 foundry reforged ready | Godot ", Engine.get_version_info().string)
+	print("Slay the highway / 杀路 v0.9.6 UI ready | Godot ", Engine.get_version_info().string)
 	if "--preview" in OS.get_cmdline_user_args():
 		start_game()
 		_spawn_enemy("normal", 1, -10.0)
@@ -150,10 +162,16 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	if _ui_settings_dirty:
+		_save_ui_settings()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
 func _notification(what: int) -> void:
+	if what in [NOTIFICATION_APPLICATION_FOCUS_OUT, NOTIFICATION_APPLICATION_PAUSED]:
+		_ui_pointer_capture_until_release = false
+		if is_instance_valid(hud) and hud.has_method("cancel_menu_gesture"):
+			hud.cancel_menu_gesture()
 	if what == NOTIFICATION_WM_GO_BACK_REQUEST:
 		if state == "playing":
 			_pause_game()
@@ -171,12 +189,17 @@ func is_mobile_input_enabled() -> bool:
 
 
 func _input(event: InputEvent) -> void:
-	if state == "menu" and not menu_prepared:
-		if event is InputEventKey and event.pressed and not event.echo and event.keycode in [KEY_ENTER,KEY_KP_ENTER]:
-			start_when_menu_prepared = true
-		elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-			start_when_menu_prepared = true
+	if _ui_pointer_capture_until_release and event is InputEventMouse:
+		if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and not event.pressed:
+			_ui_pointer_capture_until_release = false
+			hud.cancel_menu_gesture()
+		get_viewport().set_input_as_handled()
 		return
+	if state != "playing" and is_instance_valid(hud):
+		_update_hud()
+		if hud.handle_menu_input(event):
+			get_viewport().set_input_as_handled()
+			return
 	if is_instance_valid(touch_controls) and touch_controls.handle_event(event):
 		get_viewport().set_input_as_handled()
 		return
@@ -184,7 +207,7 @@ func _input(event: InputEvent) -> void:
 	if touch_mode and event is InputEventMouse and event.device == -1:
 		return
 	if event is InputEventKey:
-		if event.keycode == KEY_SHIFT:
+		if event.keycode == KEY_SHIFT and state == "playing":
 			shift_down = event.pressed
 		if not event.pressed or event.echo:
 			return
@@ -248,11 +271,6 @@ func _input(event: InputEvent) -> void:
 			aim_angles.y = clampf(aim_angles.y - event.relative.y * 0.0016, -0.20, 0.20)
 	if event is InputEventMouseButton:
 		if state != "playing":
-			if event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-				if state == "paused":
-					_resume_game()
-				else:
-					start_game()
 			return
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
@@ -324,6 +342,7 @@ func start_game() -> void:
 	_clear_projectiles()
 	_clear_blasts()
 	state = "playing"
+	sword.visible = true
 	combat_events.clear()
 	combat_stats = {"parries": 0, "perfects": 0, "hits_taken": 0, "projectiles_cut": 0, "windups": 0, "impacts": 0, "kills": 0, "slash_time": 0.0}
 	speed = BASE_SPEED
@@ -404,6 +423,7 @@ func _build_menu_showcase() -> void:
 	menu_showcase.name = "MenuShowcase"
 	add_child(menu_showcase)
 	var back := _box(menu_showcase,Vector3(11,6,0.2),Vector3(0,3,-9),_material(Color("14212b"),true))
+	back.name = "PreparationCover"
 	back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	var models: Array[Node3D] = []
 	for kind in ["normal","tank","ranged","boss","drone","missile_drone","barrier","beam","normal"]:
@@ -431,7 +451,9 @@ func _build_menu_showcase() -> void:
 	var portrait = EnemyScript.new()
 	menu_showcase.add_child(portrait)
 	portrait.configure("normal",1)
-	portrait.position = Vector3(0,-0.055,-6.5)
+	portrait.name = "MenuPortrait"
+	portrait.position = Vector3(3.3,-0.055,-5.8)
+	portrait.scale = Vector3.ONE*1.2
 	portrait.set_meta("simulation_scale",0.0)
 	portrait.set_action("recover",1.0)
 	# Warm the actual cut-particle variant from a real, noncritical material
@@ -455,9 +477,14 @@ func _build_menu_showcase() -> void:
 
 func _finish_menu_preparation() -> void:
 	await RenderingServer.frame_post_draw
+	# Keep the highway and one portrait on the actual title screen. The other
+	# already-rendered variants and their cover only prepare combat resources.
+	if is_instance_valid(menu_showcase):
+		for child in menu_showcase.get_children():
+			if child is Node3D and child.name != "MenuPortrait": child.visible = false
 	menu_prepared = true
 	if start_when_menu_prepared and state == "menu":
-		start_game()
+		_start_game_from_ui()
 
 
 func _start_cutting_lab() -> void:
@@ -500,7 +527,169 @@ func _reset_input() -> void:
 	sword.set_pose("sheathed")
 
 
+func _start_game_from_ui(reset_mode: bool = true) -> void:
+	if reset_mode:
+		practice = false
+		training = false
+	ui_quit_requested = false
+	if training:
+		_start_cutting_lab()
+	else:
+		start_game()
+	_ui_pointer_capture_until_release = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+	_update_hud()
+
+
+func _return_to_menu() -> void:
+	if slashing:
+		_consume_strokes()
+	_reset_input()
+	for enemy in enemies:
+		if is_instance_valid(enemy): enemy.queue_free()
+	enemies.clear()
+	_clear_projectiles()
+	_clear_blasts()
+	for effect in impact_effects:
+		if is_instance_valid(effect.node): effect.node.queue_free()
+	impact_effects.clear()
+	state = "menu"
+	sword.visible = false
+	practice = false
+	training = false
+	show_timing = false
+	boss_spawned = false
+	boss_enemy = null
+	boss_timer = 2.5
+	boss_pattern = 0
+	victory_timer = -1.0
+	start_when_menu_prepared = false
+	ui_quit_requested = false
+	speed = BASE_SPEED
+	gear = 1
+	elapsed = 0.0
+	game_clock = 0.0
+	run_distance = 0.0
+	effective_runner_speed = 0.0
+	route_section = 0
+	hit_stop = 0.0
+	hurt_flash = 0.0
+	shake = 0.0
+	stroke_alpha = 0.0
+	impact_strength = 0.0
+	kill_pulse = 0.0
+	parry_pulse = 0.0
+	aim_angles = Vector2.ZERO
+	camera.position = Vector3(0,1.75,0)
+	camera.rotation = Vector3.ZERO
+	camera.fov = 76.0
+	for index in range(road_segments.size()):
+		road_segments[index].position.z = ROAD_FIRST_TILE_Z-float(index)*ROAD_TILE_LENGTH
+		_set_route_section(road_segments[index],0)
+	_update_speed_flow()
+	if is_instance_valid(menu_showcase):
+		menu_showcase.queue_free()
+		menu_showcase = null
+	menu_prepared = true
+	_build_menu_showcase()
+	audio.set_runner_motion(0.0,0.0,false,0.0)
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_ui_pointer_capture_until_release = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+	_update_hud()
+
+
+func _on_ui_feedback(_kind: StringName) -> void:
+	if is_instance_valid(audio):
+		audio.play_event("guard_release",0.32)
+
+
+func _on_ui_action(action: StringName, value: Variant) -> void:
+	match action:
+		&"start":
+			if state not in ["menu","dead","won"]: return
+			if state == "menu" and not menu_prepared:
+				start_when_menu_prepared = true
+				_ui_pointer_capture_until_release = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+			else:
+				_start_game_from_ui()
+		&"restart":
+			if state in ["paused","dead","won"]: _start_game_from_ui(false)
+		&"resume":
+			if state == "paused":
+				_resume_game()
+				_ui_pointer_capture_until_release = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+		&"menu":
+			if state != "playing": _return_to_menu()
+		&"quit":
+			if state == "playing" or ui_quit_requested: return
+			ui_quit_requested = true
+			ui_quit_count += 1
+			_save_ui_settings()
+			if not test_mode: _quit_from_ui()
+		&"volume":
+			if state == "playing" or not (value is float or value is int): return
+			ui_settings.volume = clampf(float(value),0.0,1.0)
+			_ui_setting_changed()
+		&"fullscreen", &"vsync", &"msaa":
+			if state == "playing" or not value is bool: return
+			ui_settings[String(action)] = bool(value)
+			_ui_setting_changed()
+	_update_hud()
+
+
+func _quit_from_ui() -> void:
+	await get_tree().create_timer(0.04).timeout
+	get_tree().quit()
+
+
+func _load_ui_settings() -> void:
+	if _ui_preferences_enabled and ui_settings_path.begins_with("user://"):
+		var config := ConfigFile.new()
+		if config.load(ui_settings_path) == OK:
+			var volume: Variant = config.get_value("ui","volume",1.0)
+			if volume is float or volume is int: ui_settings.volume = clampf(float(volume),0.0,1.0)
+			for key in ["fullscreen","vsync","msaa"]:
+				var saved: Variant = config.get_value("ui",key,true)
+				if saved is bool: ui_settings[key] = saved
+	_apply_ui_settings()
+
+
+func _apply_ui_settings() -> void:
+	var bus := AudioServer.get_bus_index("Master")
+	if bus >= 0:
+		var volume: float = float(ui_settings.volume)
+		AudioServer.set_bus_mute(bus,volume <= 0.001)
+		AudioServer.set_bus_volume_db(bus,linear_to_db(maxf(volume,0.0001)))
+	get_viewport().msaa_3d = Viewport.MSAA_4X if bool(ui_settings.msaa) else Viewport.MSAA_DISABLED
+	if DisplayServer.get_name() == "headless": return
+	var mode := DisplayServer.WINDOW_MODE_FULLSCREEN if bool(ui_settings.fullscreen) else DisplayServer.WINDOW_MODE_WINDOWED
+	if DisplayServer.window_get_mode() != mode:
+		DisplayServer.window_set_mode(mode)
+		if mode == DisplayServer.WINDOW_MODE_WINDOWED:
+			DisplayServer.window_set_size(Vector2i(1280,720))
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_ENABLED if bool(ui_settings.vsync) else DisplayServer.VSYNC_DISABLED)
+
+
+func _ui_setting_changed() -> void:
+	_apply_ui_settings()
+	_ui_settings_dirty = true
+	_ui_settings_save_delay = 0.35
+
+
+func _save_ui_settings() -> void:
+	_ui_settings_dirty = false
+	if not _ui_preferences_enabled or not ui_settings_path.begins_with("user://"): return
+	var config := ConfigFile.new()
+	for key in ui_settings: config.set_value("ui",key,ui_settings[key])
+	var error := config.save(ui_settings_path)
+	if error != OK:
+		push_warning("UI preferences could not be saved: "+error_string(error))
+
+
 func _process(delta: float) -> void:
+	if _ui_settings_dirty:
+		_ui_settings_save_delay -= delta / maxf(Engine.time_scale,0.001)
+		if _ui_settings_save_delay <= 0.0:
+			_save_ui_settings()
 	real_clock += delta
 	impact_strength = move_toward(impact_strength, 0.0, delta * 7.5)
 	kill_pulse = move_toward(kill_pulse, 0.0, delta * 4.8)
@@ -1432,6 +1621,7 @@ func _update_hud() -> void:
 		var impact_time: float = maxf(0.0, (-projectile_node.position.z - 0.9) / maxf(projectile.velocity.z, 0.1))
 		targets.append({"screen": camera.unproject_position(projectile_node.global_position), "progress": clampf(1.0 - impact_time / 1.2, 0.0, 1.0), "kind": "projectile", "can_cut": true, "label": "斩爆 / 反射", "time_left": impact_time})
 	hud.set_snapshot({
+		"menu_ready":menu_prepared,"ui_settings":ui_settings.duplicate(),
 		"state": state, "speed": speed, "gear": gear, "health": health,
 		"score": score, "kills": kills, "combo": combo, "time": elapsed,
 		"duration": route_duration, "slow": slashing, "parry": guard_remaining / 0.30,
@@ -1904,6 +2094,8 @@ func _build_interface() -> void:
 	layer.add_child(hud)
 	hud.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud.ui_action.connect(_on_ui_action)
+	hud.ui_feedback.connect(_on_ui_feedback)
 	touch_controls = TouchScript.new()
 	layer.add_child(touch_controls)
 	touch_controls.configure(self, touch_mode)

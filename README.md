@@ -1,8 +1,10 @@
-# Game Off 2026 — SHIFT
+# Slay the highway / 杀路
 
 使用 **Godot 4.7.2 stable / GDScript** 制作的 Game Off 2026 参赛项目。
 当前方向为 **3D 第一人称自动奔跑 + 太刀斩击**。玩家固定横向位置、无法换道，迎击四条敌人跑道；包含四档速度、振刀加速、慢动作轨迹斩击和关键部位体素切断。
-当前版本为 **v0.9.5 场景与密集破坏修订（2026-11-08，本机技术复核与试玩包核对完成，用户试玩待评）**。四章工业场景、六款真实可切障碍及灯件实体连接已升级。最终 `355B…` 完成实际专项 / 保真、CPU 对照、原生画面 / 回收 / 显示 / EXE、20 秒 / 完整 180 秒路线加 Boss 和六文件包身份核对。完整路线 5 血 / 52 杀、p99 21.264ms，仍有 2 帧超过 50ms；Boss / 密集四目标 CPU 中位约下降 41.24% / 36.76% 仅指 headless 局部对照，不称整局无卡顿或用户验收。补灯前 `1385…` 单独归档，详见 DESIGN 第 32 节。
+当前为 **v0.9.6 极简 UI 初版（2026-11-08，本机技术复核与试玩包核对完成，用户试玩待评）**。正式英文名为 **Slay the highway**，中文名为 **杀路**。菜单可按住左键划切选项，也可点击或用键盘；主菜单、暂停、结算、设置与操作说明采用统一极简排版。实际 PCK 的 UI / 设置、原生画面、独立启动、20 秒 / 60 秒路线加 Boss 与六文件包已核对，正常回放仍记录到 >50ms 帧；范围见 DESIGN 第 33 节，不称手感或审美已获认可。UI 初版仍在本地 `codex/slay-ui-initial`，GitHub 的 `main` / `v0.9.5` 检查点保持前版。
+
+此前 **v0.9.5 场景与密集破坏修订（2026-11-08，本机技术复核与试玩包核对完成，用户试玩待评）**。四章工业场景、六款真实可切障碍及灯件实体连接已升级。最终 `355B…` 完成实际专项 / 保真、CPU 对照、原生画面 / 回收 / 显示 / EXE、20 秒 / 完整 180 秒路线加 Boss 和六文件包身份核对。完整路线 5 血 / 52 杀、p99 21.264ms，仍有 2 帧超过 50ms；Boss / 密集四目标 CPU 中位约下降 41.24% / 36.76% 仅指 headless 局部对照，不称整局无卡顿或用户验收。补灯前 `1385…` 单独归档，详见 DESIGN 第 32 节。
 
 此前 **v0.9.4 Blade Flux 长斩体素特效（2026-11-08，本地发行包已核对，用户试玩待评）**。96 槽冷白 / 青白刀身体素与分层暖热命中粒子已接入，实际 PCK 的 126 / 0、313 / 0 与长斩专项 53 / 0、GPU 及 basic 20 秒 / mixed 60 秒加 Boss 已核对；姿态、刀路、锁镜头与真实伤害保留。mixed 为 5 血 / 13 杀，仍记录 12 帧超过 50ms，不能称整局无卡顿或主观效果获认可。显示 / 独立 EXE / 14 项依赖已通过，六文件 ZIP / 30 源身份已核对。Check / 导出通过范围为相同资源字节镜像；共享工作区两轮未正常退出及首轮夹具失败保留，见 DESIGN 第 31 节。
 
@@ -12,7 +14,7 @@ v0.9.2 场景阴影回收修订（2026-11-08，本机局部复核完成，用户
 
 v0.9.1 Art & Motion 全套造型 / 动作修订（2026-11-07～08，本机技术复核完成，用户试玩待评）：八类真实可切对象已统一重做 / 打磨；地面怪加入大腿 / 小腿 / 脚掌分段步态，射手采用真实双段支撑臂和实际相机瞄向，实体弹体使用共用分面壳体并提高相对奔跑弹速。真实腕切发现的双手材料粘连已用四格掌背倒角修正，保留断腕禁发弹规则。场景包含装配线、炉区、高架桥和核心长廊；最终实际 PCK 已通过 126 项原行为与 91 项专项、20 秒 / 完整 180 秒路线加 Boss、独立 EXE、显示及 14 项依赖核对，六文件 ZIP 与 26 文件源快照身份一致。完整路线 4 血 / 47 杀，仍采到 14 帧超过 50ms，不能称整局无卡顿；具体数据与边界见 DESIGN 第 28 节。旧候选和 v0.9.0 的计时各自保留，技术结果不代替用户评价。
 
-继续使用 Godot 4.7.2 标准版 / GDScript / Compatibility，保留十二式轻击、刀柄跟手的连续长斩、实际窄刃线、重型逐层切割、可再切残骸及 v0.7.3 三倍热体素喷射。普通怪保留 34×56×22、0.05m、4826 格真实材料；肉盾、射手、Boss、两类飞行器及两类障碍也已制作对应装甲 / 结构轮廓。造型、持武器结构与动作均参与实际切割，最终画面与人工体验仍待评价。默认全屏、4× MSAA 与垂直同步；手机版后续已取消，游戏正式名称与新增技能仍未定。
+继续使用 Godot 4.7.2 标准版 / GDScript / Compatibility，保留十二式轻击、刀柄跟手的连续长斩、实际窄刃线、重型逐层切割、可再切残骸及 v0.7.3 三倍热体素喷射。普通怪保留 34×56×22、0.05m、4826 格真实材料；肉盾、射手、Boss、两类飞行器及两类障碍也已制作对应装甲 / 结构轮廓。造型、持武器结构与动作均参与实际切割，最终画面与人工体验仍待评价。默认全屏、4× MSAA 与垂直同步；手机版后续已取消；正式名称已定为 Slay the highway / 杀路，剧情与额外技能仍待定。
 
 v0.8.3 已错开刀镡共面饰片，并统一第一人称武器绘制深度，处理另行确认的近景 SSAO 灰色噪点，保留场景 SSAO / 照明。旧实际 v0.8.2 PCK 与最终 v0.8.3 的 16 × 273 红 / 绿内部采样中，钢色穿出为 1147→0；正式材质另做 16 个微动位姿对照。最终 PCK 完成挥刀 / 长斩 / 振刀固定输入画面、高速空路画面与 basic 20 秒路线加 Boss 真实时间回放，独立 EXE、显示设置和六文件 ZIP 核对通过；这些局部验证不等于完整整局或用户体验验收。
 
@@ -22,7 +24,7 @@ v0.8.2 最终源码通过 Check 与 126 项行为检查，实际发行 PCK 完�
 
 2026-11-06 的 v0.8.1 历史状态：Check 与最终夹具的 126 项行为检查通过，EXE 独立 headless / OpenGL 启动及无画面 `--fast` 逻辑筛查通过；**默认 VSync 的真实时间战斗回放拒收**。这些旧记录和包不改写为后来已通过，详见 DESIGN 第 24 节。
 
-v0.9.5 源码整理为 [v0.9.5 检查点](https://github.com/tsonghonglee-commits/githubgamejam/tree/v0.9.5)，索引见 [v0.9.5.json](docs/milestones/v0.9.5.json)。这份源码保留本轮场景、六款障碍、破坏优化与灯件修正，命名与 UI 初版随后单独制作。此前 v0.7.3 提交 [5189b88](https://github.com/tsonghonglee-commits/githubgamejam/commit/5189b88f2ab92b38734fd7c7debaaf97b8131107) 仍保留。
+已按用户要求先把 v0.9.5 源码推至公开仓库 `main`，提交为 [df8c420](https://github.com/tsonghonglee-commits/githubgamejam/commit/df8c42099ad78f778b11ba8d8430cb1470f3a425)，[v0.9.5 标签](https://github.com/tsonghonglee-commits/githubgamejam/tree/v0.9.5) 解析到同一提交；索引见 [v0.9.5.json](docs/milestones/v0.9.5.json)。该检查点保留场景、六款障碍、破坏优化与灯件修正，v0.9.6 命名与 UI 在之后的独立分支制作。此前 v0.7.3 提交 [5189b88](https://github.com/tsonghonglee-commits/githubgamejam/commit/5189b88f2ab92b38734fd7c7debaaf97b8131107) 仍保留。
 
 v0.7.3 已通过 Check 与 126 项行为检查；与实际旧 PCK 的同一首断相比，发射量 97→291 颗，实际剩余材料同为 1054 格。已查看首断 / 再切 GPU 画面，实际发行 PCK 完成 speed 60 秒 / basic 20 秒正常路线加 Boss，独立 EXE 启动与显示设置读回通过。量化和完整包校验范围见 DESIGN 第 22 节；粒子数值与回放不代替人工试玩的爽感评价。
 
@@ -40,11 +42,13 @@ v0.7.2 已通过 Check 与 126 项行为检查；96 个重型首轻击样本均�
 
 1. 使用 Godot **4.7.2 标准版**，在项目管理器导入根目录的 `project.godot`。
 2. 打开后按 **F5** 运行主场景。
-3. 在开始界面按 **Enter** 开始；死亡后可按 **Enter** 重开。
+3. 菜单支持按住左键划过选项，或短点并在同一按钮上松开；也可用 **Tab / 方向键**选项、**Enter** 确认、**Esc** 返回或暂停。v0.9.6 已核对这些输入流程，用户操作手感仍待试玩。
 
 v0.9.1 菜单会先实际绘制敌人 / 弹体 / 爆炸材料并准备首次切口，准备完成后进入游戏；提前按 Enter 会排队开始。准备耗时与正式战斗采样分开记录，完整结果见 DESIGN 第 28 节。
 
-电脑版默认全屏，保留 **4× MSAA 抗锯齿**和**垂直同步**。当前 [v0.9.5 EXE](builds/windows-v095/githubgamejam.exe) / [v0.9.5 Windows 完整包](builds/SHIFT-CUT-v0.9.5-Windows.zip) 已完成本机技术复核及六文件包校验；EXE 须与同目录 `.pck` 放在一起，本轮范围及残余长帧见 DESIGN 第 32 节。历史 [v0.9.4 EXE](builds/windows-v094/githubgamejam.exe) / [v0.9.4 Windows 完整包](builds/SHIFT-CUT-v0.9.4-Windows.zip) 保留，第 31 节记录其独立范围。历史 [v0.9.3 EXE](builds/windows-v093/githubgamejam.exe) / [v0.9.3 Windows 完整包](builds/SHIFT-CUT-v0.9.3-Windows.zip) 保留，最终身份、旧拒收与限制见 `builds/release-review-v093/release-validation.json` 和第 30 节。历史 [v0.9.2 EXE](builds/windows-v092/githubgamejam.exe) / [v0.9.2 Windows 完整包](builds/SHIFT-CUT-v0.9.2-Windows.zip)、[v0.9.1 EXE](builds/windows-v091/githubgamejam.exe) / [v0.9.1 Windows 完整包](builds/SHIFT-CUT-v0.9.1-Windows.zip) 及更早包亦保留，各版证据分别记录。
+电脑版首次默认全屏、**4× MSAA 抗锯齿**和**垂直同步**，可在设置中调整并保存。当前 [v0.9.6 EXE](builds/windows-v096/slay_the_highway.exe) / [v0.9.6 Windows 完整包](builds/Slay-the-highway-v0.9.6-Windows.zip) 已完成本机技术复核与包校验，EXE 须与同目录 `.pck` 放在一起，具体范围见 DESIGN 第 33 节。此前 [v0.9.5 EXE](builds/windows-v095/githubgamejam.exe) / [v0.9.5 Windows 完整包](builds/SHIFT-CUT-v0.9.5-Windows.zip) 已完成本机技术复核及六文件包校验；EXE 须与同目录 `.pck` 放在一起，本轮范围及残余长帧见 DESIGN 第 32 节。历史 [v0.9.4 EXE](builds/windows-v094/githubgamejam.exe) / [v0.9.4 Windows 完整包](builds/SHIFT-CUT-v0.9.4-Windows.zip) 保留，第 31 节记录其独立范围。历史 [v0.9.3 EXE](builds/windows-v093/githubgamejam.exe) / [v0.9.3 Windows 完整包](builds/SHIFT-CUT-v0.9.3-Windows.zip) 保留，最终身份、旧拒收与限制见 `builds/release-review-v093/release-validation.json` 和第 30 节。历史 [v0.9.2 EXE](builds/windows-v092/githubgamejam.exe) / [v0.9.2 Windows 完整包](builds/SHIFT-CUT-v0.9.2-Windows.zip)、[v0.9.1 EXE](builds/windows-v091/githubgamejam.exe) / [v0.9.1 Windows 完整包](builds/SHIFT-CUT-v0.9.1-Windows.zip) 及更早包亦保留，各版证据分别记录。
+
+v0.9.6 ZIP SHA-256：`561E94A628579C5370C0687FE7A2C07F6F895B682FB3B4D788775F509B6E58CA`。本轮 PCK、36 源、12 份执行凭据、compiled remap 与六文件校验见 `builds/release-review-v096/release-validation.json`。
 
 v0.9.5 ZIP SHA-256：`02B2DB4D74754E192C80488F5C8DF522595E1935D997EA36D72226E1046FB0F8`。完整源 / 包 / 执行凭据及 compiled remap 核对见 `builds/release-review-v095/release-validation.json`。
 
@@ -162,7 +166,7 @@ v0.2 已完成 Windows release 导出和独立包启动检查，试玩包为 `bu
 
 | 预设 | 输出 | 当前验证状态 |
 | --- | --- | --- |
-| Windows Desktop | `builds/windows-v095/githubgamejam.exe` 与同目录 `.pck` | 最终 `355B…` 镜像 Check / 导出、独立目录实际专项 / 保真、原生 / 正常 180 秒加 Boss、六文件 ZIP / 34 源与严格 compiled 身份已核对；用户试玩待评，范围见 DESIGN 第 32 节 |
+| Windows Desktop | `builds/windows-v096/slay_the_highway.exe` 与同目录 `.pck` | v0.9.6 Check / 导出、实际 UI 与设置、原生 / 20 秒和 60 秒路线加 Boss、六文件 ZIP 与 compiled 身份已核对；用户试玩待评，详见 DESIGN 第 33 节 |
 | Web | `builds/web/index.html` 与同目录文件 | 尚未安装 4.7.2 Web 模板 |
 | Android | `builds/android/SHIFT-CUT-v0.4.1-Android.apk` | 保留历史 v0.4.1 触屏包与预设；手机版后续已取消，本轮未导出 / 验证 Android |
 
