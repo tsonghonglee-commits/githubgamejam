@@ -564,6 +564,13 @@ func _verify_reflection_profiles() -> void:
 				var enemy = _profile_target(kind)
 				var before: PackedByteArray = enemy._voxels.duplicate()
 				var initial_tags := _hash_bytes(enemy._tags)
+				var initial_dimensions: Vector3i = enemy._dimensions
+				var reactor_regions := [0,0]
+				for tag: int in enemy._tags:
+					if tag&8: reactor_regions[0] += 1
+					if tag&16: reactor_regions[1] += 1
+				var double_reactor_model: bool = enemy.has_method("get_boss_reactor_state")
+				var connected_reactors := int(enemy.get_boss_reactor_state().connected) if double_reactor_model else 0
 				var definition := _profile_site(kind,site)
 				var aim: Vector3 = _posed_local(enemy,definition.point,int(definition.part))
 				var from := aim+Vector3(0,0,4)
@@ -581,7 +588,7 @@ func _verify_reflection_profiles() -> void:
 				shot.set_reflected()
 				game._update_projectiles(0.25)
 				var material := _material_result(enemy,before,point,radius)
-				var row := {"key":key,"enemy_kind":kind,"site":site,"shot_kind":shot_kind,"impact_point":[point.x,point.y,point.z],"trace_voxel_index":trace.voxel_index,"initial_cells_sha256":_hash_bytes(before),"initial_tags_sha256":initial_tags,"initial_material":before.size()-before.count(0),"radius":radius,"actual":material,"kills":game.kills}
+				var row := {"key":key,"enemy_kind":kind,"site":site,"shot_kind":shot_kind,"impact_point":[point.x,point.y,point.z],"trace_voxel_index":trace.voxel_index,"initial_cells_sha256":_hash_bytes(before),"initial_tags_sha256":initial_tags,"initial_material":before.size()-before.count(0),"initial_dimensions":[initial_dimensions.x,initial_dimensions.y,initial_dimensions.z],"initial_array_size":before.size(),"initial_reactor_regions":reactor_regions,"initial_connected_reactors":connected_reactors,"radius":radius,"actual":material,"kills":game.kills}
 				expect(material.matches_full_scan and material.removed == int(row.initial_material)-int(material.remaining),"reflected sphere removes exactly real cell-centres and retains every other cell: "+key)
 				if kind in ["tank","boss"] and site == "hand":
 					expect(not enemy.dead and (reflection_baseline_only or int(material.removed) > 0),"off-core heavy hand impact remains structural rather than contact-killing: "+key)
@@ -592,12 +599,23 @@ func _verify_reflection_profiles() -> void:
 					expect(material.actual_removed_mask_sha256 == direct.actual_removed_mask_sha256 and material.dead == direct.dead,"return damage / sever result matches the actual local sphere primitive: "+key)
 					if old_rows.has(key):
 						var old: Dictionary = old_rows[key]
-						expect(row.initial_cells_sha256 == old.initial_cells_sha256 and initial_tags == old.initial_tags_sha256 and point.distance_to(Vector3(old.impact_point[0],old.impact_point[1],old.impact_point[2])) < 0.00001,"old092 / current reflection comparison uses identical real material and first-contact point: "+key)
-						row["v092_removed"] = old.actual.removed
-						row["removed_increase"] = int(material.removed)-int(old.actual.removed)
-						expect(int(material.removed) >= maxi(int(old.actual.removed)+5,int(ceil(float(old.actual.removed)*1.5))),"returned blast makes materially more real damage than old092 at the same contact: "+key)
-						if is_equal_approx(radius,float(old.candidate_direct_sphere.radius)):
-							expect(material.actual_removed_mask_sha256 == old.candidate_direct_sphere.actual_removed_mask_sha256 and material.dead == old.candidate_direct_sphere.dead,"new broad rejection preserves old092 exact same-radius cut cells / sever result: "+key)
+						if kind == "boss" and double_reactor_model:
+							# The097 Boss deliberately changes its occupied grid and tags.
+							# Compare current-world spheres against an independent full
+							# scan, never differently sized old092 index-mask hashes or
+							# differently traced contacts as if they were a damage A/B.
+							row["comparison_scope"] = "Revised double-reactor Boss: current full-sphere and direct-primitive oracles only. Old092 model/point identity and damage A/B are inapplicable."
+							row["old092_initial_material"] = old.initial_material
+							if site == "hand" and shot_kind == "bolt":
+								expect(row.initial_cells_sha256 != old.initial_cells_sha256 and initial_tags != old.initial_tags_sha256 and int(row.initial_material) > int(old.initial_material) and initial_dimensions.z > 28 and reactor_regions[0] > 0 and reactor_regions[1] > 0 and connected_reactors == 2,"revised Boss explicitly changes occupied depth/material/tags and begins with two real connected reactor regions",{"dimensions":row.initial_dimensions,"material":row.initial_material,"old_material":old.initial_material,"reactor_tag_cells":reactor_regions,"connected":connected_reactors})
+							expect(direct.matches_full_scan and int(direct.reported_removed) == int(material.removed) and material.actual_removed_mask_sha256 == direct.full_scan_sphere_mask_sha256,"revised Boss current first-contact blast matches independent full-sphere cells and the direct primitive exactly: "+key)
+						else:
+							expect(row.initial_cells_sha256 == old.initial_cells_sha256 and initial_tags == old.initial_tags_sha256 and point.distance_to(Vector3(old.impact_point[0],old.impact_point[1],old.impact_point[2])) < 0.00001,"old092 / current reflection comparison uses identical real material and first-contact point: "+key)
+							row["v092_removed"] = old.actual.removed
+							row["removed_increase"] = int(material.removed)-int(old.actual.removed)
+							expect(int(material.removed) >= maxi(int(old.actual.removed)+5,int(ceil(float(old.actual.removed)*1.5))),"returned blast makes materially more real damage than old092 at the same contact: "+key)
+							if is_equal_approx(radius,float(old.candidate_direct_sphere.radius)):
+								expect(material.actual_removed_mask_sha256 == old.candidate_direct_sphere.actual_removed_mask_sha256 and material.dead == old.candidate_direct_sphere.dead,"new broad rejection preserves old092 exact same-radius cut cells / sever result: "+key)
 				rows.append(row)
 	observations["reflection_profiles"] = rows
 
@@ -828,13 +846,31 @@ func _verify_reflection_residue() -> void:
 		if not enemy.dead:
 			var centre: Vector2 = game.camera.unproject_position(enemy.get_aim_point())
 			var bounds: Rect2 = enemy.get_screen_bounds(game.camera)
-			# Genuine visible central material is cut layer by layer. No fixed
-			# number of cuts, hidden death flag or HP substitute is imposed.
-			for pass_index in range(enemy._dimensions.z+1):
-				var cut: Dictionary = enemy.cut_screen(game.camera,Vector2(bounds.position.x-4,centre.y),Vector2(bounds.end.x+4,centre.y),2.15)
-				further_removed += int(cut.removed)
-				passes += 1
-				if enemy.dead or int(cut.removed) == 0: break
+			# Genuine visible material is cut layer by layer. The Boss now has
+			# two deep cassettes, not the old single shallow central core. Sweep
+			# explicit narrow lines over both visible ports as their layers recede
+			# in perspective; never erase tags or call the material commit helper.
+			if kind == "boss" and enemy.has_method("get_boss_reactor_state"):
+				for pass_index in range(enemy._dimensions.z+1):
+					var pass_removed := 0
+					for side in [-1.0,1.0]:
+						for row in range(13):
+							var y := 2.56+float(row)*0.08
+							var a: Vector2 = game.camera.unproject_position(enemy.to_global(enemy._part_pose(0)*Vector3(side*1.08-0.62,y,0.84)))
+							var b: Vector2 = game.camera.unproject_position(enemy.to_global(enemy._part_pose(0)*Vector3(side*1.08+0.62,y,0.84)))
+							var cut: Dictionary = enemy.cut_screen(game.camera,a,b,2.15)
+							pass_removed += int(cut.removed)
+							passes += 1
+							if enemy.dead: break
+						if enemy.dead: break
+					further_removed += pass_removed
+					if enemy.dead or pass_removed == 0: break
+			else:
+				for pass_index in range(enemy._dimensions.z+1):
+					var cut: Dictionary = enemy.cut_screen(game.camera,Vector2(bounds.position.x-4,centre.y),Vector2(bounds.end.x+4,centre.y),2.15)
+					further_removed += int(cut.removed)
+					passes += 1
+					if enemy.dead or int(cut.removed) == 0: break
 			expect(enemy.dead and game.kills == 1 and further_removed > 0 and enemy.get_remaining_voxel_count() == after_blast-further_removed,kind+" surviving off-core blast damage remains available for subsequent real layer cuts and exactly one structural kill",{"passes":passes,"further_removed":further_removed,"remaining":enemy.get_remaining_voxel_count()})
 		var score_after: int = game.score
 		var retained_before: int = enemy.get_remaining_voxel_count()

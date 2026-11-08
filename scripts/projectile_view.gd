@@ -18,7 +18,7 @@ static var _shell_material: ShaderMaterial
 
 
 static func prewarm() -> void:
-	for kind in ["bolt","missile","shock"]:
+	for kind in ["bolt","missile","shock","mine"]:
 		GeometryScript.get_template(kind)
 	_get_shell_material()
 
@@ -44,7 +44,7 @@ func configure(kind: String) -> void:
 	var cube := BoxMesh.new()
 	cube.size = Vector3.ONE
 	_exhaust.mesh = cube
-	_exhaust.instance_count = 4 if kind == "missile" else 2
+	_exhaust.instance_count = 0 if kind == "mine" else (4 if kind == "missile" else 2)
 	var jets := MultiMeshInstance3D.new()
 	jets.multimesh = _exhaust
 	jets.material_override = _material("exhaust",Color.WHITE,0.0,0.6,true)

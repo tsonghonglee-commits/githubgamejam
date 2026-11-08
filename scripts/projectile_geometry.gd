@@ -49,6 +49,20 @@ func _build(kind: String) -> Dictionary:
 			_prism(Vector2(0.20,0.035),Vector2(0.065,0.035),-0.40,-0.03,STEEL,rotation*Vector3(0.23,0,0),rotation,Vector2(-0.065,0))
 		indicator_size = Vector3(0.06,0.06,0.045)
 		indicator_position = Vector3(0,0,0.66)
+	elif kind == "mine":
+		radius = 0.34
+		exhaust_start = -0.24
+		exhaust_size = 0.04
+		# A compact cubic charge with four separated armour lugs. The gaps
+		# remain real empty space in the same convex solids used for cutting.
+		_box(Vector3(0.42,0.42,0.42),Vector3.ZERO,DARK)
+		_box(Vector3(0.30,0.30,0.05),Vector3(0,0,0.235),COPPER)
+		for side in [-1.0,1.0]:
+			_box(Vector3(0.13,0.52,0.30),Vector3(side*0.25,0,0),PAINT)
+			_box(Vector3(0.22,0.12,0.30),Vector3(0,side*0.25,0),STEEL)
+			_box(Vector3(0.05,0.18,0.045),Vector3(side*0.25,0,0.175),COPPER)
+		indicator_size = Vector3(0.13,0.13,0.07)
+		indicator_position = Vector3(0,0,0.295)
 	elif kind == "shock":
 		radius = 0.46
 		exhaust_start = -0.26

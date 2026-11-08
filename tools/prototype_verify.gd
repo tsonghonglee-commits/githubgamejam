@@ -497,7 +497,8 @@ func verify_cut_voxel_particles() -> void:
 	enemy.set_meta("simulation_scale", 1.0)
 	manager._process(0.8)
 	expect(int(enemy.get_cut_particle_debug_state().active_count) == 0, "cut voxel burst slots are reclaimed after their finite lifetime")
-	expect(bounded_repeats and verify_saturated_spark_replacement(), "repeated bursts stay within both budgets and a globally full pool can replace only its owner's cooling sparks")
+	var saturated_replacement: bool = await verify_saturated_spark_replacement()
+	expect(bounded_repeats and saturated_replacement, "repeated bursts stay within both budgets and a globally full pool can replace only its owner's cooling sparks")
 	pointer_button(false)
 	clear_targets()
 	game.training = false
@@ -505,7 +506,22 @@ func verify_cut_voxel_particles() -> void:
 
 func verify_saturated_spark_replacement() -> bool:
 	# Exercise the new full-global-budget branch rather than infer it from a
-	# single saturated local pool. This is an isolated visual resource fixture.
+	# single saturated local pool. Earlier start_game calls queue old actor
+	# owners for deletion and clear the actor array before their pools exit.
+	# Observe those owners, then isolate this fixture at a real tree boundary;
+	# a pending old pool must not silently consume the fifth owner's budget.
+	var global_before: int = VoxelDebris.CutVoxelBurst.global_active_count
+	var prior_owners: Array = []
+	var pending: Array[Node] = [game]
+	while not pending.is_empty():
+		var node: Node = pending.pop_back()
+		if node is VoxelDebris.CutVoxelBurst and int(node.active_count) > 0:
+			prior_owners.append({"pool":str(node.get_path()),"active":int(node.active_count),"owner_id":node.get_parent().get_instance_id(),"owner_queued":node.get_parent().is_queued_for_deletion()})
+		pending.append_array(node.get_children())
+	clear_targets()
+	await process_frame
+	var isolated_start: int = VoxelDebris.CutVoxelBurst.global_active_count
+	print("SPARK POOL FIXTURE ISOLATION: ",JSON.stringify({"global_before":global_before,"prior_owners":prior_owners,"isolated_start":isolated_start}))
 	var owners: Array[Node3D] = []
 	var pools: Array = []
 	var source: Vector3 = game.camera.project_position(game.get_viewport().get_visible_rect().size * 0.5, 9.0)
@@ -546,7 +562,7 @@ func verify_saturated_spark_replacement() -> bool:
 	var valid := empty_next and partial_owner and int(before.global_active_count) == int(before.global_capacity) and int(after.global_active_count) == int(before.global_active_count) and int(after.active_count) == int(before.active_count) and int(after.last_burst_count) > 0 and int(after.emitted_sever) > int(before.emitted_sever) and reused_oldest and neighbours_unchanged
 	for owner_node in owners:
 		owner_node.free()
-	return valid and VoxelDebris.CutVoxelBurst.global_active_count == 0
+	return isolated_start == 0 and valid and VoxelDebris.CutVoxelBurst.global_active_count == 0
 
 
 func verify_wide_follow_through() -> void:
@@ -861,12 +877,32 @@ func _run() -> void:
 		var maximum_usec: int = 0
 		# A larger authored depth can require more real layers than the old
 		# six-pass fixture. Bound work by the grid depth and require progress.
-		for cut_index in range(enemy._dimensions.z + 1):
-			var result: Dictionary = enemy.cut_screen(game.camera, cut_start, cut_end, 2.15)
-			removed += int(result.removed)
-			maximum_usec = maxi(maximum_usec, enemy.last_cut_usec)
-			if enemy.dead or int(result.removed) == 0:
-				break
+		if kind == "boss" and enemy.has_method("get_boss_reactor_state"):
+			# The former horizontal line crossed one shallow central core. The
+			# two real deep cassettes require paths over their visible face as
+			# layers recede in perspective. Sweep narrow, explicit parallel lines
+			# across each whole port; never delete tags or call the commit helper.
+			for pass_index in range(enemy._dimensions.z + 1):
+				var pass_removed := 0
+				for side in [-1.0,1.0]:
+					for row in range(13):
+						var y := 2.56+float(row)*0.08
+						var a: Vector2 = game.camera.unproject_position(enemy.to_global(enemy._part_pose(0)*Vector3(side*1.08-0.62,y,0.84)))
+						var b: Vector2 = game.camera.unproject_position(enemy.to_global(enemy._part_pose(0)*Vector3(side*1.08+0.62,y,0.84)))
+						var result: Dictionary = enemy.cut_screen(game.camera,a,b,2.15)
+						pass_removed += int(result.removed)
+						maximum_usec = maxi(maximum_usec,enemy.last_cut_usec)
+						if enemy.dead: break
+					if enemy.dead: break
+				removed += pass_removed
+				if enemy.dead or pass_removed == 0: break
+		else:
+			for cut_index in range(enemy._dimensions.z + 1):
+				var result: Dictionary = enemy.cut_screen(game.camera, cut_start, cut_end, 2.15)
+				removed += int(result.removed)
+				maximum_usec = maxi(maximum_usec, enemy.last_cut_usec)
+				if enemy.dead or int(result.removed) == 0:
+					break
 		expect(removed > 0 and enemy.cut_count > 0, kind + " removes real voxel material")
 		expect(enemy.dead, kind + " dies from actual core/structural severing")
 		expect(enemy.get_remaining_voxel_count() == material_before - removed, kind + " retains all uncut material in re-cuttable fragments")
@@ -1099,13 +1135,23 @@ func _run() -> void:
 				continue
 			var target_aim: Vector2 = game.camera.unproject_position(target.get_aim_point())
 			var target_bounds: Rect2 = target.get_screen_bounds(game.camera)
-			game._cut(Vector2(target_bounds.position.x - 16, target_aim.y), Vector2(target_bounds.end.x + 16, target_aim.y), false)
+			if target.enemy_kind == "boss" and target.has_method("get_boss_reactor_state"):
+				# This route fixture still drives the public narrow material cut.
+				# Alternate visible cassettes and their face rows instead of hanging
+				# forever on the old single-core horizontal ray as depth recedes.
+				var side := -1.0 if int(frame/13)%2 == 0 else 1.0
+				var y := 2.56+float(frame%13)*0.08
+				var a: Vector2 = game.camera.unproject_position(target.to_global(target._part_pose(0)*Vector3(side*1.08-0.62,y,0.84)))
+				var b: Vector2 = game.camera.unproject_position(target.to_global(target._part_pose(0)*Vector3(side*1.08+0.62,y,0.84)))
+				game._cut(a,b,false)
+			else:
+				game._cut(Vector2(target_bounds.position.x - 16, target_aim.y), Vector2(target_bounds.end.x + 16, target_aim.y), false)
 		if frame % 90 == 0:
 			await process_frame
 	expect(game.elapsed >= 180.0 and game.kills > 20 and game.state == "won", "full scripted route reaches and defeats boss through real slicing")
 	verify_weapon_motion_contracts()
 	verify_light_styles_and_hilt_direction()
-	verify_cut_voxel_particles()
+	await verify_cut_voxel_particles()
 	verify_wide_follow_through()
 	verify_all_style_held_takeovers()
 	verify_runner_flow_and_audio()

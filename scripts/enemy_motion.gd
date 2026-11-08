@@ -135,3 +135,68 @@ static func _segment_transform(bind_start: Vector3, bind_end: Vector3, posed_sta
 static func _perpendicular(direction: Vector3) -> Vector3:
 	var reference := Vector3.UP if absf(direction.y) < 0.9 else Vector3.RIGHT
 	return (reference - direction * reference.dot(direction)).normalized()
+
+
+# The three space-shooter archetypes keep their actual launch hardware posed
+# with the cell body. Time is the enemy's world age, so pause, hit-stop and
+# long-slash slow motion cannot leave the wings or recoil running separately.
+static func sample_space_flyer(kind: String, time: float, lane: int, action: String, phase: float) -> Dictionary:
+	var p := clampf(phase,0.0,1.0)
+	var charge := smoothstep(0.0,0.90,p) if action == "ranged_charge" else 0.0
+	var aim := charge
+	var kick := 0.0
+	if action == "ranged_fire":
+		aim = 1.0-smoothstep(0.62,1.0,p)
+		if kind == "interceptor":
+			for shot in [0.18,0.38,0.58]:
+				kick = maxf(kick,_launch_pulse(p,float(shot),0.13))
+		else:
+			kick = _launch_pulse(p,0.25,0.32)
+	var hover_rate := 4.0 if kind == "interceptor" else (2.2 if kind == "mine_layer" else 2.8)
+	var hover_height := 0.065 if kind == "interceptor" else 0.035
+	var hover := hover_height*sin(time*hover_rate+float(lane)*0.7)
+	var bank := (0.075 if kind == "interceptor" else 0.025)*sin(time*1.9+float(lane)*0.4)*(1.0-aim)
+	var angles := Vector3(-0.12*aim-0.08*kick,0.025*sin(time*1.5),bank)
+	var offset := Vector3(0,hover,-0.14*kick)
+	if action == "windup":
+		var ready := smoothstep(0.0,0.85,p)
+		angles.x = -0.28*ready
+		offset += Vector3(0,0.11*ready,-0.19*ready)
+	elif action == "strike":
+		var dive := smoothstep(0.02,0.52,p)
+		var follow := smoothstep(0.56,1.0,p)
+		angles.x = lerpf(-0.28,0.36,dive)-0.14*follow
+		offset += Vector3(0,lerpf(0.11,-0.23,dive)+0.11*follow,0.13*sin(p*PI))
+	elif action == "stagger":
+		var release := 1.0-smoothstep(0.0,1.0,p)
+		angles.x = -0.22*release
+		offset += Vector3(0,-0.06*release,-0.18*sin(p*PI))
+	var basis := Basis.from_euler(angles)
+	var pivot := Vector3(0,2.18,-0.12)
+	var parts: Dictionary = {}
+	for part in [1,2]:
+		var side := -1.0 if part == 1 else 1.0
+		var hinge: Vector3
+		var wing_angles: Vector3
+		match kind:
+			"shield_drone":
+				hinge = Vector3(side*0.30,2.24,-0.05)
+				wing_angles = Vector3(0,side*(0.025+0.20*aim),side*0.018*sin(time*2.2))
+			"interceptor":
+				hinge = Vector3(side*0.28,2.16,-0.13)
+				wing_angles = Vector3(-0.06*aim,side*0.04*aim,side*(0.11*aim+0.03*sin(time*3.7)))
+			_:
+				hinge = Vector3(side*0.40,2.16,-0.17)
+				wing_angles = Vector3(-0.10*aim,0,side*(0.09*aim+0.012*sin(time*2.0)))
+		var wing_basis := Basis.from_euler(wing_angles)
+		parts[part] = Transform3D(wing_basis,hinge-wing_basis*hinge)
+	if kind == "mine_layer":
+		var hinge := Vector3(0,1.86,0.15)
+		var hatch_basis := Basis(Vector3.RIGHT,0.18*aim)
+		parts[3] = Transform3D(hatch_basis,hinge-hatch_basis*hinge)
+	return {"rig":Transform3D(basis,pivot-basis*pivot+offset),"parts":parts,"charge":charge,"kick":kick}
+
+
+static func _launch_pulse(phase: float, start: float, duration: float) -> float:
+	var t := (phase-start)/duration
+	return sin(PI*t)*(1.0-t) if t >= 0.0 and t <= 1.0 else 0.0

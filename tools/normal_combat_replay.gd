@@ -10,7 +10,7 @@ const REVIEW_SOURCE_PATHS: Array[String] = [
 	"res://scripts/prototype_hud.gd", "res://scripts/prototype_audio.gd",
 	"res://scripts/projectile_view.gd", "res://scripts/voxel_blast.gd",
 	"res://scripts/route_sections.gd", "res://scripts/projectile_geometry.gd",
-	"res://scripts/enemy_motion.gd", "res://scripts/touch_controls.gd",
+	"res://scripts/enemy_motion.gd", "res://scripts/touch_controls.gd", "res://scripts/enemy_archetypes.gd",
 ]
 
 var game
@@ -662,7 +662,7 @@ func _control(dt: float) -> void:
 	if target == null:
 		return
 	var action: String = str(target.get_meta("action_state", "run"))
-	var use_long: bool = policy == "speed" or (policy == "mixed" and target.enemy_kind in ["tank", "boss", "barrier", "beam", "missile_drone"])
+	var use_long: bool = policy == "speed" or (policy == "mixed" and target.enemy_kind in ["tank", "boss", "barrier", "beam", "missile_drone", "shield_drone", "mine_layer"])
 	if target.enemy_kind == "boss" and action in ["boss_windup", "boss_strike"]:
 		# Let the pose finish; answer its shot, then attack the recovery opening.
 		return

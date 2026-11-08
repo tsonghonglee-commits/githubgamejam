@@ -6,11 +6,15 @@ signal damaged(enemy: Node3D, world_point: Vector3, removed_count: int)
 
 const DebrisScript = preload("res://scripts/voxel_debris.gd")
 const MotionScript = preload("res://scripts/enemy_motion.gd")
+const ArchetypesScript = preload("res://scripts/enemy_archetypes.gd")
 const PART_COUNT := 10
 const FULL_MESH_MASK := (1 << PART_COUNT)-1
 const HEAD_TAG := 1
 const CORE_TAG := 2
 const ANCHOR_TAG := 4
+const BOSS_LEFT_REACTOR_TAG := 8
+const BOSS_RIGHT_REACTOR_TAG := 16
+const BOSS_REACTOR_POINTS: Array[Vector3] = [Vector3(-1.08,3.04,-0.65),Vector3(1.08,3.04,-0.65)]
 const DIRECTIONS: Array[Vector3i] = [
 	Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
 	Vector3i(0, 1, 0), Vector3i(0, -1, 0),
@@ -93,6 +97,8 @@ var _ranged_last_pose_age := 0.0
 var _ranged_aim_direction := Vector3.BACK
 var _ranged_left_hold := Vector3.ZERO
 var _ranged_right_hold := Vector3.ZERO
+var _boss_reactor_connected: Array[bool] = [true,true]
+var _boss_sensor_connected := true
 
 
 static func prewarm_normal_model() -> void:
@@ -148,6 +154,8 @@ func configure(kind: String, lane: int = 0, variant: int = -1) -> void:
 	# request one without changing the lane or collision/critical-point rules.
 	construct_variant = posmod(variant if variant >= 0 else lane-1,3) if _is_construct() else 0
 	dead = false
+	_boss_reactor_connected = [true,true]
+	_boss_sensor_connected = true
 	resolved = false
 	attack_done = 0
 	fire_timer = 0.0
@@ -200,6 +208,11 @@ func configure(kind: String, lane: int = 0, variant: int = -1) -> void:
 
 
 func _set_model_dimensions(kind: String) -> void:
+	if ArchetypesScript.supports(kind):
+		var layout: Dictionary = ArchetypesScript.dimensions(kind)
+		_dimensions = layout.dimensions
+		_cell = float(layout.cell)
+		return
 	match kind:
 		"normal":
 			_dimensions = Vector3i(34, 56, 22)
@@ -208,7 +221,7 @@ func _set_model_dimensions(kind: String) -> void:
 			_dimensions = Vector3i(48, 44, 22)
 			_cell = 0.075
 		"boss":
-			_dimensions = Vector3i(92, 60, 28)
+			_dimensions = Vector3i(92, 60, 40)
 			_cell = 0.075
 		"ranged":
 			_dimensions = Vector3i(34, 62, 24)
@@ -249,7 +262,7 @@ func _build_voxel_data() -> void:
 		_cell_points[index] = _point(coordinate.x, coordinate.y, coordinate.z)
 		if _voxels[index] != 0:
 			_live_indices.append(index)
-			if enemy_kind in ["tank","boss"]:
+			if enemy_kind in ["tank","boss","shield_drone"]:
 				var key := coordinate.x+coordinate.y*_dimensions.x
 				if not _depth_columns.has(key): _depth_columns[key] = PackedInt32Array()
 				_depth_columns[key].append(index)
@@ -258,11 +271,11 @@ func _build_voxel_data() -> void:
 
 
 func _uses_fine_grid() -> bool:
-	return enemy_kind in ["normal", "tank", "ranged", "boss", "drone", "missile_drone", "barrier", "beam"]
+	return ArchetypesScript.supports(enemy_kind) or enemy_kind in ["normal", "tank", "ranged", "boss", "drone", "missile_drone", "barrier", "beam"]
 
 
 func _is_flying() -> bool:
-	return enemy_kind in ["drone", "missile_drone"]
+	return ArchetypesScript.supports(enemy_kind) or enemy_kind in ["drone", "missile_drone"]
 
 
 func _is_construct() -> bool:
@@ -279,7 +292,38 @@ func _make_template(meshes: Array) -> Dictionary:
 
 
 func get_aim_point() -> Vector3:
+	if enemy_kind == "boss" and not dead:
+		var active := 0 if _boss_reactor_connected[0] else 1
+		var point := BOSS_REACTOR_POINTS[active]
+		# The visible inset port identifies an intact cassette, rather than the
+		# decorative central vent or a reactor that was already cut away.
+		point.z = 0.84
+		return _rig.to_global(point) if is_instance_valid(_rig) else to_global(point)
 	return _rig.to_global(_core_point) if is_instance_valid(_rig) else to_global(_core_point)
+
+
+func get_boss_reactor_state() -> Dictionary:
+	# Cached from the same components that commit actual cuts. Reading this
+	# for encounter pacing/HUD never runs a per-frame connectivity scan.
+	var connected := 0
+	var positions: Array[Vector3] = []
+	for index in range(BOSS_REACTOR_POINTS.size()):
+		if _boss_reactor_connected[index] and not dead: connected += 1
+		positions.append(to_global(_part_pose(0)*BOSS_REACTOR_POINTS[index]))
+	return {"total":2,"connected":connected,"active":_boss_reactor_connected.duplicate(),"world_positions":positions,"sensor_connected":_boss_sensor_connected}
+
+
+func _refresh_boss_reactors(groups: Array[Dictionary]) -> void:
+	_boss_reactor_connected = [false,false]
+	_boss_sensor_connected = false
+	for group: Dictionary in groups:
+		var flags: int = group.flags
+		if flags & ANCHOR_TAG:
+			if flags & BOSS_LEFT_REACTOR_TAG: _boss_reactor_connected[0] = true
+			if flags & BOSS_RIGHT_REACTOR_TAG: _boss_reactor_connected[1] = true
+			if flags & HEAD_TAG: _boss_sensor_connected = true
+	if _material is ShaderMaterial:
+		_material.set_shader_parameter("boss_reactor_power",Vector2(1.0 if _boss_reactor_connected[0] else 0.0,1.0 if _boss_reactor_connected[1] else 0.0))
 
 
 func get_screen_bounds(camera: Camera3D) -> Rect2:
@@ -316,6 +360,10 @@ func set_action_variant(index: int) -> void:
 
 
 func get_muzzle_point() -> Vector3:
+	if ArchetypesScript.supports(enemy_kind):
+		var emitters: Array[Dictionary] = ArchetypesScript.emitters(enemy_kind)
+		var emitter: Dictionary = emitters[0]
+		return to_global(_part_pose(int(emitter.part))*Vector3(emitter.point))
 	if _is_flying():
 		var local := Vector3(0, 1.98, 0.36) if enemy_kind == "drone" else Vector3(1.08, 2.12, 0.52)
 		return to_global(_part_pose(0 if enemy_kind == "drone" else 2) * local)
@@ -328,7 +376,11 @@ func get_ranged_origins() -> Array[Vector3]:
 	var origins: Array[Vector3] = []
 	if dead or not _configured:
 		return origins
-	if enemy_kind == "drone":
+	if ArchetypesScript.supports(enemy_kind):
+		for emitter: Dictionary in ArchetypesScript.emitters(enemy_kind):
+			if _emitter_intact(int(emitter.part)):
+				origins.append(to_global(_part_pose(int(emitter.part))*Vector3(emitter.point)))
+	elif enemy_kind == "drone":
 		if _emitter_intact(0):
 			origins.append(get_muzzle_point())
 	elif enemy_kind == "missile_drone":
@@ -346,6 +398,10 @@ func get_ranged_origins() -> Array[Vector3]:
 
 func has_attack_limb(variant: int = -1) -> bool:
 	if dead or not _configured:
+		return false
+	if ArchetypesScript.supports(enemy_kind):
+		for emitter: Dictionary in ArchetypesScript.emitters(enemy_kind):
+			if _emitter_intact(int(emitter.part)): return true
 		return false
 	var selected: int = action_variant if variant < 0 else variant
 	match enemy_kind:
@@ -370,6 +426,7 @@ func _emitter_intact(part: int) -> bool:
 
 
 func _scan_emitter_intact(part: int) -> bool:
+	if ArchetypesScript.supports(enemy_kind): return ArchetypesScript.emitter_intact(self,part)
 	# Only surviving forward launch hardware counts. A rear wing stump must
 	# not keep firing after its actual gun / launch mouth has been sliced off.
 	for index in _live_indices:
@@ -606,6 +663,9 @@ func _update_ranged_hold(sim_delta: float) -> void:
 
 
 func _set_expansion_action(action: String, phase: float) -> void:
+	if ArchetypesScript.supports(enemy_kind):
+		ArchetypesScript.apply_pose(self,action,phase)
+		return
 	action_name = action
 	action_phase = clampf(phase, 0.0, 1.0)
 	if _is_construct():
@@ -671,6 +731,7 @@ func _classify_part_index(index: int) -> int:
 		return 0
 	if _is_flying():
 		var point := _point(coords.x, coords.y, coords.z)
+		if ArchetypesScript.supports(enemy_kind): return ArchetypesScript.classify_part(enemy_kind,point)
 		if enemy_kind == "drone" and point.z > 0.075:
 			for rotor in range(2):
 				var centre := Vector2(-0.94 if rotor == 0 else 0.94,2.0)
@@ -805,7 +866,14 @@ func _build_action_rig() -> void:
 	_body = _part_meshes[0]
 	_weapon_edge_material = _prop_material(Color("ff8844"), true)
 	_expansion_glows.clear()
-	if _is_flying():
+	if ArchetypesScript.supports(enemy_kind):
+		for emitter: Dictionary in ArchetypesScript.emitters(enemy_kind):
+			var part_index := int(emitter.part)
+			var glow := _box_prop(_parts[part_index],Vector3(0.08,0.08,0.035),Vector3(emitter.point),_weapon_edge_material)
+			glow.name = "LaunchCharge"
+			glow.set_meta("emitter_part",part_index)
+			_expansion_glows.append(glow)
+	elif _is_flying():
 		for part_index in ([0] if enemy_kind == "drone" else [2, 1]):
 			var point := Vector3(0, 1.98, 0.37) if enemy_kind == "drone" else Vector3(1.08 if part_index == 2 else -1.08, 2.12, 0.53)
 			var glow := _box_prop(_parts[part_index], Vector3(0.08, 0.08, 0.035), point, _weapon_edge_material)
@@ -1238,8 +1306,12 @@ func _cut_body(camera: Camera3D, points: PackedVector2Array, power: float, blade
 	if points.size() < 2:
 		return {"removed": 0, "killed": false}
 	var start_time: int = Time.get_ticks_usec()
-	var cell_screen: Vector2 = camera.unproject_position(_rig.to_global(_core_point + Vector3(_cell, 0.0, 0.0)))
-	var core_screen: Vector2 = camera.unproject_position(get_aim_point())
+	var aim_point := get_aim_point()
+	# Both samples must use the same aim origin. Boss ports can switch after
+	# a reactor is lost; comparing a central sample with an offset port would
+	# accidentally turn their metre-wide separation into the blade's width.
+	var cell_screen: Vector2 = camera.unproject_position(aim_point+_rig.global_basis.x*_cell)
+	var core_screen: Vector2 = camera.unproject_position(aim_point)
 	var band: float = maxf(3.5, cell_screen.distance_to(core_screen) * (0.75 + power * 0.18))
 	var bounds: Rect2 = get_screen_bounds(camera).grow(band * 1.5)
 	var relevant_segments := PackedInt32Array()
@@ -1260,11 +1332,11 @@ func _cut_body(camera: Camera3D, points: PackedVector2Array, power: float, blade
 			stroke = direction
 	var cut_indices := PackedInt32Array()
 	var depth_budget: int = _dimensions.z
-	if enemy_kind == "tank":
+	if enemy_kind in ["tank","shield_drone"]:
 		depth_budget = clampi(int(floor(power * 1.40)), 1, _dimensions.z)
 	elif enemy_kind == "boss":
 		depth_budget = clampi(int(floor(power * 1.25)), 1, _dimensions.z)
-	var armored := enemy_kind in ["tank", "boss"]
+	var armored := enemy_kind in ["tank", "boss", "shield_drone"]
 	var part_poses: Array[Transform3D] = []
 	if armored or _uses_fine_grid():
 		for part in range(PART_COUNT):
@@ -1346,12 +1418,22 @@ func _commit_material_cut(cut_indices: PackedInt32Array, stroke: Vector2, camera
 			largest = indices.size()
 			primary = group_index
 	var was_dead := dead
-	dead = was_dead or not core_survives or not core_connected_to_base or not head_connected_to_base
+	if enemy_kind == "boss":
+		_refresh_boss_reactors(groups)
+		# The head is a removable sensor. Each real reactor and its own retained
+		# base connection can power the remaining machine independently.
+		dead = was_dead or not _boss_reactor_connected.has(true)
+	else:
+		dead = was_dead or not core_survives or not core_connected_to_base or not head_connected_to_base
 	if is_instance_valid(camera):
 		DebrisScript.emit_cut_particles(self, camera, spark_sources, stroke, _cell, "sever" if dead and not was_dead else "body")
 	for group_index in range(groups.size()):
-		if not dead and group_index == primary:
-			continue
+		if not dead:
+			var flags: int = groups[group_index].flags
+			if enemy_kind == "boss":
+				if flags & ANCHOR_TAG and flags & (BOSS_LEFT_REACTOR_TAG|BOSS_RIGHT_REACTOR_TAG): continue
+			elif group_index == primary:
+				continue
 		var indices: PackedInt32Array = groups[group_index]["indices"]
 		if _spawn_fragment(indices, stroke, dead):
 			for index in indices:
@@ -1408,6 +1490,9 @@ func _select_coarse_cut(camera: Camera3D, points: PackedVector2Array, relevant_s
 
 
 func _build_robot() -> void:
+	if ArchetypesScript.supports(enemy_kind):
+		ArchetypesScript.build(self)
+		return
 	if _is_flying():
 		_build_flyer()
 		_finish_machine_details()
@@ -1969,10 +2054,21 @@ func _build_boss() -> void:
 	_slasher_box(Vector3(0,1.81,-0.09),Vector3(1.85,0.36,0.82),2)
 	_slasher_rod(Vector3(0,1.93,-0.08),Vector3(0,2.64,-0.04),0.31,3)
 	for side in [-1.0,1.0]:
+		# Separate deep reactor cassettes, carried by two broad rear spars.
+		# These are occupied, cuttable layers all the way from the visible
+		# front plate to the inset reactor. They are not cosmetic shield shells.
+		_slasher_taper(1.82,3.39,Vector2(side*0.68,-0.72),Vector2(side*1.08,-0.72),0.52,0.56,0.76,0.76,2)
+		_slasher_box(Vector3(side*1.08,3.04,-0.25),Vector3(0.96,1.20,1.65),2)
+		_slasher_box(Vector3(side*1.08,3.04,-0.65),Vector3(0.45,0.54,0.38),4)
+		_slasher_box(Vector3(side*1.08,3.04,0.64),Vector3(0.79,0.97,0.15),1)
+		for rail in [-0.33,0.33]:
+			_slasher_box(Vector3(side*1.08+rail,3.04,0.75),Vector3(0.10,0.87,0.11),5)
+		_slasher_box(Vector3(side*1.08,3.04,0.75),Vector3(0.13,0.64,0.11),10)
+		_slasher_box(Vector3(side*1.08,3.04,0.82),Vector3(0.08,0.38,0.05),4)
 		_slasher_rod(Vector3(side*0.38,1.96,-0.19),Vector3(side*0.65,2.73,-0.17),0.12,5)
 		_slasher_taper(1.50,2.01,Vector2(side*0.76,0.40),Vector2(side*0.46,0.38),0.63,0.57,0.22,0.24,1)
-		# Open copper furnace cage: the lit core is inset behind independent
-		# chest plates and a deep dark back, rather than a sphere on the surface.
+		# The original central furnace cage is now a noncritical vent between
+		# the two independent side cassettes, rather than a single fatal core.
 		_slasher_rod(Vector3(side*0.54,2.49,-0.10),Vector3(side*0.69,3.57,-0.11),0.16,3)
 		_slasher_taper(2.55,3.56,Vector2(side*1.11,0.10),Vector2(side*1.22,0.04),0.88,0.97,0.75,0.82,2)
 		_slasher_taper(2.72,3.49,Vector2(side*1.13,0.54),Vector2(side*1.20,0.47),0.70,0.79,0.22,0.24,1)
@@ -2010,7 +2106,8 @@ func _build_boss() -> void:
 		_slasher_box(Vector3(side*3.12,4.20,-0.15),Vector3(0.17,0.36,0.12),10)
 	_surface_hazard_stripes()
 	_slasher_tags(Vector3(0,4.08,-0.02),Vector3(0.28,0.18,0.31),HEAD_TAG)
-	_slasher_tags(Vector3(0,2.98,-0.02),Vector3(0.33,0.43,0.35),CORE_TAG)
+	for index in range(BOSS_REACTOR_POINTS.size()):
+		_slasher_tags(BOSS_REACTOR_POINTS[index],Vector3(0.45,0.54,0.38),CORE_TAG|(BOSS_LEFT_REACTOR_TAG if index == 0 else BOSS_RIGHT_REACTOR_TAG))
 	_slasher_tags(Vector3(0,1.82,-0.09),Vector3(1.25,0.22,0.52),ANCHOR_TAG)
 	_core_point = Vector3(0,2.97,0.39)
 
@@ -2052,8 +2149,21 @@ render_mode cull_disabled;
 uniform float warning : hint_range(0.0, 1.0) = 0.0;
 uniform float paint_value = 1.0;
 uniform float heat_value = 0.0;
+uniform float boss_ports = 0.0;
+uniform vec2 boss_reactor_power = vec2(1.0);
+varying vec3 authored_position;
+void vertex() {
+	authored_position = VERTEX;
+}
 void fragment() {
 	vec3 base = COLOR.rgb;
+	// Only the surviving real inset port faces change colour when their
+	// cassette loses actual power connectivity. Missing cells stay missing.
+	float port_yz = step(abs(authored_position.y-3.04),0.23) * step(0.77,authored_position.z);
+	float left_port = step(abs(authored_position.x+1.08),0.08) * port_yz;
+	float right_port = step(abs(authored_position.x-1.08),0.08) * port_yz;
+	float unpowered = boss_ports * (left_port*(1.0-boss_reactor_power.x)+right_port*(1.0-boss_reactor_power.y));
+	base = mix(base,vec3(0.065,0.08,0.085),unpowered);
 	// The solid palette travels with each cut cell and its detached fragments.
 	// Family tests use colour ratios so the existing per-face shading survives.
 	float sensor = step(base.r * 1.35, base.b) * step(0.3, base.g);
@@ -2075,6 +2185,8 @@ void fragment() {
 	body_material.shader = body_shader
 	body_material.set_shader_parameter("paint_value", 0.74 if enemy_kind == "normal" else 0.82)
 	body_material.set_shader_parameter("heat_value", 1.0 if _is_flying() or enemy_kind in ["tank","boss"] else 0.0)
+	body_material.set_shader_parameter("boss_ports",1.0 if enemy_kind == "boss" else 0.0)
+	body_material.set_shader_parameter("boss_reactor_power",Vector2.ONE)
 	_material = body_material
 	_reactor_material = StandardMaterial3D.new()
 	_reactor_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED

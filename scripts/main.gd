@@ -13,7 +13,10 @@ const MAX_PROJECTILES := 24
 const MAX_BLASTS := 12
 const ENEMY_RUN_SPEED := 2.8
 const PROJECTILE_SPEED_SCALE: float = 2.0 / 3.0
-const REFLECTED_BLAST_RADII := {"bolt":0.90,"shock":1.15,"missile":1.45}
+const REFLECTED_BLAST_RADII := {"bolt":0.90,"shock":1.15,"missile":1.45,"mine":1.25}
+const FLYING_ENEMIES := ["drone","missile_drone","shield_drone","interceptor","mine_layer"]
+const RANGED_ENEMIES := ["ranged","drone","missile_drone","shield_drone","interceptor","mine_layer"]
+const ENCOUNTER_SEQUENCE := ["normal","interceptor","shield_drone","ranged","mine_layer","barrier","tank","drone","missile_drone","beam","interceptor","normal","shield_drone","mine_layer","tank","ranged"]
 const MIN_SPEED: float = 4.0
 const BASE_SPEED: float = 18.0
 const MAX_SPEED: float = 60.0
@@ -150,10 +153,10 @@ func _ready() -> void:
 	_load_ui_settings()
 	ProjectileScript.prewarm()
 	EnemyScript.prewarm_normal_model()
-	EnemyScript.prewarm_models(["tank", "ranged", "boss", "drone", "missile_drone", "barrier", "beam"])
+	EnemyScript.prewarm_models(["tank", "ranged", "boss", "drone", "missile_drone", "barrier", "beam", "shield_drone", "interceptor", "mine_layer"])
 	_build_menu_showcase()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	print("Slay the highway / 杀路 v0.9.6 UI ready | Godot ", Engine.get_version_info().string)
+	print("Slay the highway / 杀路 v0.9.7 squadrons ready | Godot ", Engine.get_version_info().string)
 	if "--preview" in OS.get_cmdline_user_args():
 		start_game()
 		_spawn_enemy("normal", 1, -10.0)
@@ -426,7 +429,7 @@ func _build_menu_showcase() -> void:
 	back.name = "PreparationCover"
 	back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	var models: Array[Node3D] = []
-	for kind in ["normal","tank","ranged","boss","drone","missile_drone","barrier","beam","normal"]:
+	for kind in ["normal","tank","ranged","boss","drone","missile_drone","barrier","beam","normal","shield_drone","interceptor","mine_layer"]:
 		var actor = EnemyScript.new()
 		menu_showcase.add_child(actor)
 		actor.configure(kind,1)
@@ -461,7 +464,7 @@ func _build_menu_showcase() -> void:
 	var cut_point: Vector3 = models[0].to_global(models[0]._part_pose(1)*Vector3(-0.70,1.475,0.20))
 	var screen := camera.unproject_position(cut_point)
 	models[0].cut_screen(camera,screen-Vector2(4,0),screen+Vector2(4,0),0.4)
-	for kind in ["bolt","missile","shock"]:
+	for kind in ["bolt","missile","shock","mine"]:
 		var shot = ProjectileScript.new()
 		menu_showcase.add_child(shot)
 		shot.position = Vector3(0,1.65,-15)
@@ -1060,8 +1063,7 @@ func _update_spawning(sim_dt: float) -> void:
 	spawn_timer -= sim_dt
 	if spawn_timer > 0.0:
 		return
-	var sequence := ["normal","ranged","drone","normal","barrier","tank","missile_drone","ranged","beam","drone","normal","tank"]
-	var kind: String = sequence[wave_index % sequence.size()]
+	var kind: String = ENCOUNTER_SEQUENCE[wave_index % ENCOUNTER_SEQUENCE.size()]
 	var lane: int = [1, 2, 0, 3, 2, 1, 0, 2][wave_index % 8]
 	if kind == "tank":
 		lane = 0 if wave_index % 2 == 0 else 2
@@ -1069,8 +1071,12 @@ func _update_spawning(sim_dt: float) -> void:
 	_spawn_enemy(kind, lane, z_distance)
 	wave_index += 1
 	spawn_timer = 4.3 if elapsed < 40.0 else 3.5
-	if elapsed > 75.0 and wave_index % 4 == 0 and kind not in ["barrier","beam"]:
-		_spawn_enemy("normal", (lane + 2) % 4, z_distance - 14.0)
+	# A support craft arrives behind the lead instead of overlapping three
+	# attacks at one instant. The role pairing changes the encounter's rhythm.
+	if elapsed > 45.0 and wave_index % 5 == 0 and kind not in ["barrier","beam"]:
+		var support := "interceptor" if kind == "shield_drone" else "drone"
+		_spawn_enemy(support, (lane + 2) % 4, z_distance - 20.0)
+		_record_combat("formation",null,{"lead_kind":kind,"support_kind":support})
 
 
 func _spawn_enemy(kind: String, lane: int, z_position: float) -> Node3D:
@@ -1084,7 +1090,7 @@ func _spawn_enemy(kind: String, lane: int, z_position: float) -> Node3D:
 		x_position = 0.0
 	# The segmented deck's actual top is -0.055m. Grounded voxel soles and
 	# obstacle bases meet that receiver instead of floating above its shadow.
-	var floor_y := 0.0 if kind in ["drone","missile_drone"] else -0.055
+	var floor_y := 0.0 if kind in FLYING_ENEMIES else -0.055
 	enemy.position = Vector3(x_position, floor_y, z_position)
 	enemy.set_meta("lane_x", x_position)
 	enemy.set_meta("runner_speed", speed)
@@ -1118,6 +1124,7 @@ func _set_enemy_action(enemy, action: String, duration: float) -> void:
 	enemy.set_meta("action_start_z", enemy.position.z)
 	enemy.set_meta("action_start_x", enemy.position.x)
 	enemy.set_meta("impact_done", false)
+	if action == "ranged_fire": enemy.set_meta("burst_shots",0)
 	if enemy.has_method("set_action"):
 		enemy.set_action(action, 0.0)
 	if action == "windup" or action == "boss_windup":
@@ -1149,6 +1156,39 @@ func _start_melee(enemy, second: bool = false) -> void:
 		enemy.set_action_variant(1 if second else 0)
 	_set_enemy_action(enemy, "windup", duration)
 	audio.play_event("windup", 1.2 if enemy.enemy_kind == "tank" else 0.8)
+
+
+func _ranged_charge_duration(kind: String) -> float:
+	match kind:
+		"shield_drone": return 0.88
+		"interceptor": return 0.52
+		"mine_layer": return 0.96
+		"missile_drone": return 0.85
+	return 0.65
+
+
+func _fire_ranged_payload(enemy, burst_index: int = 0) -> bool:
+	# Re-read the actual surviving launch mouths for every burst. Cutting a
+	# weapon during its animation cancels the remaining shots from that part.
+	var origins: Array[Vector3] = enemy.get_ranged_origins()
+	if origins.is_empty():
+		_record_combat("disarmed",enemy)
+		return false
+	match enemy.enemy_kind:
+		"interceptor":
+			_spawn_projectile(origins[burst_index % origins.size()],"bolt",enemy)
+		"mine_layer":
+			for origin in origins:
+				# Separate approach lines converge inside the player's physical
+				# near-body zone; none appears to miss sideways and still hits.
+				var spread := Vector3(clampf((origin.x-enemy.global_position.x)*0.16,-0.18,0.18),clampf((origin.y-2.0)*0.30,-0.10,0.10),0)
+				_spawn_projectile(origin,"mine",enemy,spread,0.70)
+		_:
+			for origin in origins:
+				_spawn_projectile(origin,"missile" if enemy.enemy_kind == "missile_drone" else "bolt",enemy)
+	audio.play_event("ranged_fire",1.0)
+	_record_combat("ranged_fire",enemy,{"burst_index":burst_index,"live_emitters":origins.size()})
+	return true
 
 
 func _update_enemies(sim_dt: float, world_scale: float) -> void:
@@ -1201,12 +1241,13 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 		var phase: float = _advance_enemy_action(enemy, sim_dt)
 		match action:
 			"run":
-				enemy.position.z += (speed + ENEMY_RUN_SPEED) * sim_dt
+				var advance_scale := 0.80 if enemy.enemy_kind == "shield_drone" else (1.12 if enemy.enemy_kind == "interceptor" else (0.62 if enemy.enemy_kind == "mine_layer" else 1.0))
+				enemy.position.z += (speed * advance_scale + ENEMY_RUN_SPEED) * sim_dt
 				enemy.fire_timer -= sim_dt
 				if not enemy.resolved and enemy.position.z >= -13.0:
 					_start_melee(enemy)
-				elif enemy.enemy_kind in ["ranged","drone","missile_drone"] and enemy.position.z >= -34.0 and enemy.fire_timer <= 0.0:
-					_set_enemy_action(enemy, "ranged_charge", 0.85 if enemy.enemy_kind == "missile_drone" else 0.65)
+				elif enemy.enemy_kind in RANGED_ENEMIES and enemy.position.z >= -34.0 and enemy.fire_timer <= 0.0:
+					_set_enemy_action(enemy, "ranged_charge", _ranged_charge_duration(enemy.enemy_kind))
 					audio.play_event("ranged_charge", 0.8)
 					_record_combat("ranged_charge", enemy)
 			"windup":
@@ -1251,19 +1292,20 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 			"ranged_charge":
 				enemy.position.z += (speed * 0.25 + 2.0) * sim_dt
 				if phase >= 1.0:
-					_set_enemy_action(enemy, "ranged_fire", 0.22)
+					var fire_duration := 0.50 if enemy.enemy_kind == "interceptor" else (0.30 if enemy.enemy_kind == "mine_layer" else 0.22)
+					_set_enemy_action(enemy, "ranged_fire", fire_duration)
 			"ranged_fire":
-				if phase >= 0.25 and not bool(enemy.get_meta("impact_done", false)):
+				if enemy.enemy_kind == "interceptor":
+					var shot_index: int = int(enemy.get_meta("burst_shots",0))
+					while shot_index < 3 and phase >= 0.18 + float(shot_index)*0.20:
+						_fire_ranged_payload(enemy,shot_index)
+						shot_index += 1
+						enemy.set_meta("burst_shots",shot_index)
+				elif phase >= 0.25 and not bool(enemy.get_meta("impact_done", false)):
 					enemy.set_meta("impact_done", true)
-					if enemy.has_attack_limb():
-						for origin in enemy.get_ranged_origins():
-							_spawn_projectile(origin,"missile" if enemy.enemy_kind == "missile_drone" else "bolt",enemy)
-						audio.play_event("ranged_fire", 1.0)
-						_record_combat("ranged_fire", enemy)
-					else:
-						_record_combat("disarmed", enemy)
+					_fire_ranged_payload(enemy)
 				if phase >= 1.0:
-					enemy.fire_timer = 2.5
+					enemy.fire_timer = 2.8 if enemy.enemy_kind == "shield_drone" else (3.1 if enemy.enemy_kind == "mine_layer" else 2.5)
 					_set_enemy_action(enemy, "run", 1.0)
 			"exit":
 				enemy.position.z += (speed * 0.9 + 6.0) * sim_dt
@@ -1284,6 +1326,12 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 
 
 func _update_boss(enemy, sim_dt: float) -> void:
+	var reactor_state: Dictionary = enemy.get_boss_reactor_state() if enemy.has_method("get_boss_reactor_state") else {}
+	var connected: int = int(reactor_state.get("connected",2))
+	var enraged := connected == 1
+	if bool(enemy.get_meta("boss_enraged",false)) != enraged:
+		enemy.set_meta("boss_enraged",enraged)
+		_record_combat("boss_reactor_phase",enemy,{"connected_reactors":connected,"enraged":enraged})
 	var action: String = str(enemy.get_meta("action_state", "recover"))
 	var phase: float = _advance_enemy_action(enemy, sim_dt)
 	enemy.set_action(action, phase)
@@ -1297,7 +1345,7 @@ func _update_boss(enemy, sim_dt: float) -> void:
 				enemy.set_meta("action_variant", variant)
 				if enemy.has_method("set_action_variant"):
 					enemy.set_action_variant(variant)
-				_set_enemy_action(enemy, "boss_windup", 1.05 - float(gear - 1) * 0.05)
+				_set_enemy_action(enemy, "boss_windup", 1.05 - float(gear - 1) * 0.05 - (0.18 if enraged else 0.0))
 				audio.play_event("boss_charge", 1.2)
 		"boss_windup":
 			if phase >= 1.0:
@@ -1319,7 +1367,7 @@ func _update_boss(enemy, sim_dt: float) -> void:
 				if enemy.has_attack_limb(variant):
 					_record_combat("attack_impact", enemy, {"variant": variant, "projectile": true})
 			if phase >= 1.0:
-				_set_enemy_action(enemy, "recover", 1.25 - float(gear - 1) * 0.12)
+				_set_enemy_action(enemy, "recover", 1.25 - float(gear - 1) * 0.12 - (0.18 if enraged else 0.0))
 
 
 func _record_combat(event_name: String, enemy: Node3D = null, details: Dictionary = {}) -> void:
@@ -1337,7 +1385,7 @@ func _record_combat(event_name: String, enemy: Node3D = null, details: Dictionar
 		combat_events.pop_front()
 
 
-func _spawn_projectile(origin: Vector3, kind: String, source: Node3D = null) -> Node3D:
+func _spawn_projectile(origin: Vector3, kind: String, source: Node3D = null, aim_offset: Vector3 = Vector3.ZERO, speed_multiplier: float = 1.0) -> Node3D:
 	if projectiles.size() >= MAX_PROJECTILES:
 		return null
 	var node = ProjectileScript.new()
@@ -1346,8 +1394,8 @@ func _spawn_projectile(origin: Vector3, kind: String, source: Node3D = null) -> 
 	node.configure(kind)
 	# Apply the requested reduction to the entire previous launch speed.
 	# Once launched, the straight projectile keeps this velocity snapshot.
-	var travel_speed := (speed + (38.0 if kind == "bolt" else 30.0)) * PROJECTILE_SPEED_SCALE
-	var velocity := (Vector3(0.0, 1.65, -0.9) - origin).normalized() * travel_speed
+	var travel_speed := (speed + (38.0 if kind == "bolt" else 30.0)) * PROJECTILE_SPEED_SCALE * speed_multiplier
+	var velocity := (Vector3(0.0, 1.65, -0.9) + aim_offset - origin).normalized() * travel_speed
 	node.advance(0.00001, velocity)
 	projectiles.append({"node":node, "velocity":velocity, "kind":kind, "source":source, "reflected":false, "age":0.0})
 	_record_combat("projectile_spawn", source, {"projectile_kind":kind})
@@ -1409,7 +1457,7 @@ func _detonate_projectile(index: int, point: Vector3, target: Node3D = null) -> 
 	var reflected: bool = projectile.reflected
 	# Remove before emitting a cut callback: Boss death clears the array.
 	_remove_projectile(index)
-	var strength := 1.35 if kind == "missile" else (1.0 if kind == "shock" else 0.75)
+	var strength := 1.35 if kind == "missile" else (1.20 if kind == "mine" else (1.0 if kind == "shock" else 0.75))
 	_spawn_blast(point,strength,reflected)
 	audio.play_event("explosion_reflected" if reflected else "explosion",strength)
 	combat_stats["projectile_explosions"] = int(combat_stats.get("projectile_explosions",0))+1
@@ -1441,7 +1489,7 @@ func _detonate_projectile(index: int, point: Vector3, target: Node3D = null) -> 
 		if removed_total > 0:
 			# The blast owns a stronger local impact. Continuous sword input and
 			# held-mode camera locking still use the normal world-freeze path.
-			hit_stop = maxf(strongest_stop,0.065 if kind == "missile" else 0.045)
+			hit_stop = maxf(strongest_stop,0.065 if kind in ["missile","mine"] else 0.045)
 			shake = maxf(shake,0.72)
 			_feedback_contact(point,1.0,"blast")
 	_record_combat("projectile_explosion",target,{"projectile_kind":kind,"reflected":reflected,"blast_radius":radius,"hit_target_count":hit_count,"removed_total":removed_total,"world_point":[point.x,point.y,point.z]})
