@@ -162,7 +162,7 @@ func _ready() -> void:
 	EnemyScript.prewarm_models(["tank", "ranged", "boss", "drone", "missile_drone", "barrier", "beam", "shield_drone", "interceptor", "mine_layer"])
 	_build_menu_showcase()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	print("Slay the highway / 杀路 v0.9.8 encounters ready | Godot ", Engine.get_version_info().string)
+	print("Slay the highway / 杀路 v0.9.9 route cadence ready | Godot ", Engine.get_version_info().string)
 	if "--preview" in OS.get_cmdline_user_args():
 		start_game()
 		_spawn_enemy("normal", 1, -10.0)
@@ -1084,7 +1084,13 @@ func _update_spawning(sim_dt: float) -> void:
 		return
 	if wave_needs_clear and wave_quiet_time < wave_recovery_time:
 		return
-	var plan: Dictionary = EncounterScript.plan(wave_index,elapsed/maxf(route_duration,1.0),speed)
+	var plan: Dictionary = EncounterScript.plan(wave_index,elapsed/maxf(route_duration,1.0),speed,route_duration)
+	# Most waves keep the continuous v0.9.5 cadence. Only the single authored
+	# row gets a clear stage; ranged additions wait for a readable fire budget.
+	if str(plan.id) == "four_lane_row" and _has_pending_wave_enemies():
+		return
+	if not _can_spawn_encounter_wave(plan):
+		return
 	_spawn_encounter_wave(plan)
 	wave_index += 1
 	spawn_timer = float(plan.interval)
@@ -1100,8 +1106,27 @@ func _has_pending_wave_enemies() -> bool:
 	return false
 
 
+func _can_spawn_encounter_wave(plan: Dictionary) -> bool:
+	var active_shooters := 0
+	var active_advanced := false
+	for enemy in enemies:
+		if not is_instance_valid(enemy) or enemy.dead or enemy.resolved or bool(enemy.get_meta("encounter_retired",false)):
+			continue
+		if enemy.enemy_kind in RANGED_ENEMIES and enemy.has_attack_limb():
+			active_shooters += 1
+			active_advanced = active_advanced or enemy.enemy_kind in ["interceptor","mine_layer"]
+	for item: Dictionary in plan.spawns:
+		if str(item.kind) in RANGED_ENEMIES:
+			if str(item.kind) in ["interceptor","mine_layer"]:
+				if active_shooters > 0:
+					return false
+			elif active_advanced or active_shooters >= 2:
+				return false
+	return true
+
+
 func _spawn_encounter_wave(plan: Dictionary) -> void:
-	var z_distance := -maxf(44.0,(speed+ENEMY_RUN_SPEED)*float(plan.lead_seconds)+13.0)
+	var z_distance := -maxf(float(plan.minimum_distance),(speed+float(plan.approach_speed_offset))*float(plan.approach_seconds)+float(plan.distance_bias))
 	for item: Dictionary in plan.spawns:
 		var enemy = _spawn_enemy(str(item.kind),int(item.lane),z_distance+float(item.z_offset))
 		enemy.set_meta("wave_id",str(plan.id))

@@ -36,105 +36,120 @@ func _manifest() -> Dictionary:
 	return {path:{"raw_exists":raw,"runtime_path":runtime,"sha256":FileAccess.get_sha256(runtime) if not runtime.is_empty() else ""}}
 
 
-func _opening_contract() -> void:
-	var first: Dictionary = Director.plan(0,0.01,18.0)
-	var pair: Dictionary = Director.plan(1,0.10,18.0)
-	var row: Dictionary = Director.plan(2,0.20,18.0)
-	expect(first.id == "opening_single" and first.spawns.size() == 1 and first.spawns[0].kind == "normal","the opening teaches one ordinary melee enemy")
-	expect(pair.id == "staggered_pair" and pair.spawns.size() == 2 and pair.spawns[0].z_offset != pair.spawns[1].z_offset,"the second group separates two ordinary enemies in depth")
-	var lanes: Array = []
-	var delays: Array = []
-	var all_normal := true
-	var all_aligned := true
-	for spawn: Dictionary in row.spawns:
-		lanes.append(int(spawn.lane))
-		delays.append(float(spawn.attack_delay))
-		all_normal = all_normal and spawn.kind == "normal"
-		all_aligned = all_aligned and is_zero_approx(float(spawn.z_offset))
-	expect(row.id == "four_lane_row" and all_normal and all_aligned and lanes == [0,1,2,3],"the third group is four real lane slots at exactly the same depth",{"lanes":lanes,"offsets":row.spawns})
-	# Two actual guard windows can cover the two attack pairs. The main-scene
-	# fixture separately verifies these offsets reach real damage phases.
-	var first_guard := float(delays[0])-0.06
-	var second_guard := float(delays[2])-0.06
-	var guardable := second_guard-first_guard >= 0.40
-	for index in range(4):
-		var start := first_guard if index < 2 else second_guard
-		guardable = guardable and float(delays[index]) >= start and float(delays[index]) <= start+0.30
-	expect(guardable,"four-row proposals fit two 0.30s guard windows separated by the 0.40s cooldown",{"delays":delays,"guard_starts":[first_guard,second_guard]})
-	expect(is_equal_approx(float(first.interval),6.0) and is_equal_approx(float(pair.interval),6.0) and float(row.interval) >= 8.0 and float(row.lead_seconds) >= 3.0 and float(row.recovery_seconds) >= 1.2,"the row has a longer approach and a recovery gap after its two simple opening lessons")
-	observations["opening"] = [first,pair,row]
-
-
-func _schedule_matrix() -> void:
-	var valid_lanes := true
-	var readable_groups := true
-	var single_complex := true
-	var lessons_gated := true
-	var shields_reserved := true
-	var recovery := true
+func _baseline_contract() -> void:
+	# Independent literals transcribed from df8c420:scripts/main.gd866-884.
+	var sequence := ["normal","ranged","drone","normal","barrier","tank","missile_drone","ranged","beam","drone","normal","tank"]
+	var lanes := [1,2,0,3,2,1,0,2]
+	var core := true
+	var cadence := true
+	var shape := true
+	var streaming := true
+	var telegraph := true
+	var shield_reserved := true
 	var deterministic := true
 	var samples := 0
-	var kinds: Dictionary = {}
-	for progress in [0.0,0.10,0.29,0.30,0.49,0.50,0.74,0.75,0.99]:
+	for elapsed in [0.0,20.0,39.99,40.0,50.0,75.0,75.01,90.0,130.0,180.0]:
 		for speed in [4.0,18.0,60.0]:
-			for wave in range(36):
-				var proposed: Dictionary = Director.plan(wave,progress,speed)
+			for index in range(48):
+				var value: Dictionary = Director.plan(index,float(elapsed)/180.0,speed,180.0)
+				deterministic = deterministic and value == Director.plan(index,float(elapsed)/180.0,speed,180.0)
+				for item: Dictionary in value.spawns: shield_reserved = shield_reserved and item.kind != "shield_drone"
+				var special := (index == 22 and elapsed >= 75.0) or (index == 13 and elapsed >= 50.0) or (index == 25 and elapsed >= 90.0) or (index == 37 and elapsed >= 130.0)
+				if special: continue
 				samples += 1
-				deterministic = deterministic and proposed == Director.plan(wave,progress,speed)
-				readable_groups = readable_groups and proposed.spawns.size() > 0 and proposed.spawns.size() <= 4
-				recovery = recovery and float(proposed.interval) >= 6.0 and float(proposed.recovery_seconds) >= 1.0 and proposed.hold_until_clear and int(proposed.heavy_ranged_cap) == 1
-				var complex_count := 0
-				for spawn: Dictionary in proposed.spawns:
-					kinds[str(spawn.kind)] = true
-					valid_lanes = valid_lanes and int(spawn.lane) >= 0 and int(spawn.lane) < 4 and float(spawn.z_offset) <= 0.0 and float(spawn.attack_delay) >= 0.0
-					if spawn.kind in Director.COMPLEX_RANGED:
-						complex_count += 1
-						readable_groups = readable_groups and float(spawn.fire_delay) >= 0.65
-					if spawn.kind == "interceptor": lessons_gated = lessons_gated and float(progress) >= 0.30
-					if spawn.kind == "mine_layer": lessons_gated = lessons_gated and float(progress) >= 0.50
-					shields_reserved = shields_reserved and spawn.kind != "shield_drone"
-				single_complex = single_complex and complex_count <= 1
-	expect(valid_lanes,"all sampled groups stay on four legal lane slots and preserve explicit depth/attack offsets",{"samples":samples})
-	expect(readable_groups,"all sampled groups contain at most four enemies and ranged lessons request extra first-shot notice")
-	expect(single_complex,"no proposed ordinary group stacks more than one complex shooter")
-	expect(lessons_gated,"interceptors wait until 30 percent and miners until 50 percent of the route")
-	expect(shields_reserved,"ordinary waves reserve shield craft for the Boss's separate escort encounter")
-	expect(recovery,"all groups request live-clearance, one-shooter cap and real recovery time")
-	expect(deterministic,"the proposal is deterministic across progress, speed and index samples")
-	expect(kinds.has("normal") and kinds.has("ranged") and kinds.has("drone") and kinds.has("interceptor") and kinds.has("mine_layer") and kinds.has("missile_drone") and kinds.has("tank") and kinds.has("beam") and kinds.has("barrier"),"later proposals still cover the established enemy and obstacle roles",{"kinds":kinds.keys()})
-	observations["matrix"] = {"samples":samples,"kinds":kinds.keys()}
+				var kind: String = sequence[index%12]
+				var lane: int = lanes[index%8]
+				if kind == "tank": lane = 0 if index%2 == 0 else 2
+				var first: Dictionary = value.spawns[0]
+				core = core and first.kind == kind and int(first.lane) == lane and is_equal_approx(float(value.lead_seconds),2.0) and is_equal_approx(float(value.minimum_distance),40.0) and is_zero_approx(float(value.approach_speed_offset)) and is_equal_approx(float(value.distance_bias),12.0)
+				cadence = cadence and is_equal_approx(float(value.interval),4.3 if elapsed < 40.0 else 3.5)
+				streaming = streaming and not value.hold_until_clear and is_zero_approx(float(value.recovery_seconds))
+				var follow: bool = elapsed > 75.0 and (index+1)%4 == 0 and kind not in ["barrier","beam"]
+				shape = shape and value.spawns.size() == (2 if follow else 1) and is_zero_approx(float(first.z_offset)) and is_zero_approx(float(first.attack_delay))
+				if follow and value.spawns.size() == 2:
+					var second: Dictionary = value.spawns[1]
+					shape = shape and second.kind == "normal" and int(second.lane) == (lane+2)%4 and is_equal_approx(float(second.z_offset),-14.0) and is_zero_approx(float(second.attack_delay))
+				var first_delay := 0.25 if kind in ["ranged","drone","missile_drone"] else 0.0
+				telegraph = telegraph and is_equal_approx(float(first.fire_delay),first_delay)
+	expect(core,"unmodified slots preserve the exact095 kind/lane and speed-times-two-plus12 approach",{"sampled_unmodified_slots":samples})
+	expect(cadence,"the0954.3s-before40/3.5s-after40 cadence stays intact outside the single row")
+	expect(shape,"the095post75s every-fourth-wave normal follower retains lane-plus-two and minus14m offset")
+	expect(streaming,"ordinary slots preserve a timed overlapping stream rather than waiting for global clearance")
+	expect(telegraph,"legacy ranged slots request only the agreed0.25s first-shot notice")
+	expect(shield_reserved,"all ordinary schedule slots reserve shield craft for Boss escorts")
+	expect(deterministic,"the095-based schedule is deterministic across the sampled inputs")
+	observations["baseline"] = {"commit":"df8c42099ad78f778b11ba8d8430cb1470f3a425","samples":samples,"sequence":sequence,"lanes":lanes}
+
+
+func _special_slots() -> void:
+	var gated := true
+	var rare := true
+	var notice := true
+	for item in [{"index":13,"time":50.0,"kind":"interceptor"},{"index":25,"time":90.0,"kind":"mine_layer"},{"index":37,"time":130.0,"kind":"interceptor"}]:
+		var before: Dictionary = Director.plan(int(item.index),(float(item.time)-0.01)/180.0,18.0,180.0)
+		var after: Dictionary = Director.plan(int(item.index),float(item.time)/180.0,18.0,180.0)
+		gated = gated and before.spawns[0].kind == "ranged" and not before.advanced_intro and after.spawns[0].kind == item.kind and after.advanced_intro
+		rare = rare and after.spawns.size() == 1 and not after.hold_until_clear and is_equal_approx(float(after.interval),3.5)
+		notice = notice and is_equal_approx(float(after.spawns[0].fire_delay),0.85 if item.kind == "mine_layer" else 0.65)
+	for index in [1,49,61,73]:
+		var value: Dictionary = Director.plan(index,1.0,18.0,180.0)
+		rare = rare and not value.advanced_intro
+	expect(gated,"only the13/25/37 ranged slots become advanced craft after50/90/130seconds")
+	expect(rare,"advanced replacements are single-slot substitutions and do not recur each sequence loop")
+	expect(notice,"the rare new craft retain their agreed extra first-shot notice")
+	var row: Dictionary = Director.plan(22,0.5,18.0,180.0)
+	var lanes: Array = []
+	var delays: Array = []
+	var aligned := row.spawns.size() == 4
+	for item: Dictionary in row.spawns:
+		lanes.append(int(item.lane));delays.append(float(item.attack_delay))
+		aligned = aligned and item.kind == "normal" and is_zero_approx(float(item.z_offset))
+	for index in [2,10,34,46,58]: aligned = aligned and Director.plan(index,1.0,18.0,180.0).id != "four_lane_row"
+	aligned = aligned and Director.plan(22,74.99/180.0,18.0,180.0).id != "four_lane_row"
+	expect(aligned and lanes == [0,1,2,3],"one post75s normal slot22 becomes the only four-lane aligned row",{"lanes":lanes,"delays":delays})
+	var guardable := delays.size() == 4
+	if guardable:
+		var first := float(delays[0])-0.06
+		var second := float(delays[2])-0.06
+		guardable = second-first >= 0.40
+		for index in range(4):
+			var start := first if index < 2 else second
+			guardable = guardable and float(delays[index]) >= start and float(delays[index]) <= start+0.30
+	expect(guardable,"the exceptional row still fits two0.30s guards separated by the0.40s cooldown")
+	expect(row.hold_until_clear and is_equal_approx(float(row.interval),4.8) and is_equal_approx(float(row.recovery_seconds),1.2) and is_equal_approx(float(row.lead_seconds),2.4),"only that row requests a clear window and its explicit recovery")
+	observations["exceptions"] = {"row":row,"advanced_indices":[13,25,37]}
 
 
 func _timeline_contract() -> void:
 	var routes: Array = []
 	for duration in [20.0,60.0,180.0]:
 		var time := 2.8
-		var wave := 0
-		var timeline: Array = []
-		var saw_row := false
+		var index := 0
+		var row_count := 0
+		var advanced := 0
 		var gated := true
-		while time < duration and wave < 100:
-			var progress: float = time / duration
-			var proposed: Dictionary = Director.plan(wave,progress,18.0)
-			saw_row = saw_row or proposed.id == "four_lane_row"
-			for spawn: Dictionary in proposed.spawns:
-				if spawn.kind == "interceptor": gated = gated and progress >= 0.30
-				if spawn.kind == "mine_layer": gated = gated and progress >= 0.50
-			timeline.append({"time":time,"wave":wave,"id":proposed.id,"kinds":proposed.spawns.map(func(row: Dictionary): return row.kind)})
-			time += float(proposed.interval)
-			wave += 1
-		expect(saw_row and gated,"the "+str(int(duration))+"s nominal schedule exposes a row and respects progressive lessons",{"waves":wave})
-		routes.append({"duration":duration,"timeline":timeline,"scope":"Nominal schedule only. The actual main-scene live-clearance budget can postpone proposals."})
+		var timeline: Array = []
+		while time < float(duration)-0.00001 and index < 100:
+			var value: Dictionary = Director.plan(index,time/float(duration),18.0,float(duration))
+			if value.id == "four_lane_row": row_count += 1
+			if value.advanced_intro:
+				advanced += 1
+				gated = gated and ((index == 13 and time >= 50.0) or (index == 25 and time >= 90.0) or (index == 37 and time >= 130.0))
+			timeline.append({"time":time,"index":index,"id":value.id,"count":value.spawns.size()})
+			time += float(value.interval)
+			index += 1
+		var correct := row_count == (1 if duration == 180.0 else 0) and gated and advanced <= (3 if duration == 180.0 else (1 if duration == 60.0 else 0))
+		expect(correct,"the "+str(int(duration))+"s nominal stream has no forced opening row and at most the agreed rare substitutions",{"waves":index,"rows":row_count,"advanced":advanced})
+		routes.append({"duration":duration,"timeline":timeline,"scope":"Nominal timed proposals only; main-scene admission limits can postpone a slot."})
 	observations["nominal_routes"] = routes
-
 
 func _run() -> void:
 	var before := _manifest()
 	if require_packed:
 		var row: Dictionary = before["res://scripts/encounter_director.gd"]
 		expect(not row.raw_exists and not str(row.runtime_path).is_empty() and str(row.runtime_path) != "res://scripts/encounter_director.gd" and not str(row.sha256).is_empty(),"standalone schedule uses its exported compiled resource without raw source fallback",row)
-	_opening_contract()
-	_schedule_matrix()
+	_baseline_contract()
+	_special_slots()
 	_timeline_contract()
 	var changed: Dictionary = Director.plan(2,0.20,18.0)
 	changed.spawns[0].lane = 99

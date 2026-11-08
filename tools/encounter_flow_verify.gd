@@ -224,7 +224,7 @@ func _verify_escort_material_and_victory() -> void:
 func _verify_four_lane_row() -> void:
 	_reset()
 	var director = load("res://scripts/encounter_director.gd")
-	var plan: Dictionary = director.plan(2,0.15,game.speed)
+	var plan: Dictionary = director.plan(22,87.0/180.0,30.0,180.0)
 	game._spawn_encounter_wave(plan)
 	var actors: Array = game.enemies.duplicate()
 	var lanes: Array = []
