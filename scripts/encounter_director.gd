@@ -28,7 +28,7 @@ static func plan(wave_index: int, progress: float, speed: float, route_seconds: 
 	elif index == 25 and elapsed >= 90.0:
 		kind = "mine_layer"
 		advanced = true
-	var first_delay := 0.65 if kind == "interceptor" else (0.85 if kind == "mine_layer" else (0.25 if kind in COMPLEX_RANGED else 0.0))
+	var first_delay := 0.25 if kind in ["ranged","drone","missile_drone"] else 0.0
 	var spawns: Array[Dictionary] = [_spawn(kind,lane,0.0,0.0,first_delay,"advanced_intro" if advanced else "baseline")]
 	# Match the old post-increment test: current zero-based slots3,7,11...
 	# may add one ordinary follower after75s, fourteen metres behind.

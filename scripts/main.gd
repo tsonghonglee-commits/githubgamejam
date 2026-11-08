@@ -162,7 +162,7 @@ func _ready() -> void:
 	EnemyScript.prewarm_models(["tank", "ranged", "boss", "drone", "missile_drone", "barrier", "beam", "shield_drone", "interceptor", "mine_layer"])
 	_build_menu_showcase()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	print("Slay the highway / 杀路 v0.9.9 route cadence ready | Godot ", Engine.get_version_info().string)
+	print("Slay the highway / 杀路 v0.9.10 restored craft ready | Godot ", Engine.get_version_info().string)
 	if "--preview" in OS.get_cmdline_user_args():
 		start_game()
 		_spawn_enemy("normal", 1, -10.0)
@@ -1290,8 +1290,8 @@ func _start_melee(enemy, second: bool = false) -> void:
 func _ranged_charge_duration(kind: String) -> float:
 	match kind:
 		"shield_drone": return 1.15
-		"interceptor": return 0.85
-		"mine_layer": return 1.25
+		"interceptor": return 0.52
+		"mine_layer": return 0.96
 		"missile_drone": return 0.85
 	return 0.65
 
@@ -1307,10 +1307,7 @@ func _fire_ranged_payload(enemy, burst_index: int = 0) -> bool:
 		"interceptor":
 			_spawn_projectile(origins[burst_index % origins.size()],"bolt",enemy)
 		"mine_layer":
-			var salvo: int = int(enemy.get_meta("mine_salvos",0))
-			enemy.set_meta("mine_salvos",salvo+1)
-			for slot in range(mini(2,origins.size())):
-				var origin: Vector3 = origins[(salvo+slot)%origins.size()]
+			for origin in origins:
 				# Separate approach lines converge inside the player's physical
 				# near-body zone; none appears to miss sideways and still hits.
 				var spread := Vector3(clampf((origin.x-enemy.global_position.x)*0.16,-0.18,0.18),clampf((origin.y-2.0)*0.30,-0.10,0.10),0)
@@ -1377,7 +1374,7 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 		var phase: float = _advance_enemy_action(enemy, sim_dt)
 		match action:
 			"run":
-				var advance_scale := 0.80 if enemy.enemy_kind == "shield_drone" else (0.90 if enemy.enemy_kind == "interceptor" else (0.62 if enemy.enemy_kind == "mine_layer" else 1.0))
+				var advance_scale := 0.80 if enemy.enemy_kind == "shield_drone" else (1.12 if enemy.enemy_kind == "interceptor" else (0.62 if enemy.enemy_kind == "mine_layer" else 1.0))
 				enemy.position.z += (speed * advance_scale + ENEMY_RUN_SPEED) * sim_dt
 				enemy.fire_timer -= sim_dt
 				if not enemy.resolved and enemy.position.z >= -13.0:
@@ -1429,19 +1426,19 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 					else:
 						_set_enemy_action(enemy, "exit", 1.0)
 			"ranged_charge":
-				if enemy.enemy_kind in ["shield_drone","interceptor","mine_layer"] or bool(enemy.get_meta("ranged_standoff",false)):
+				if enemy.enemy_kind == "shield_drone" or bool(enemy.get_meta("ranged_standoff",false)):
 					# Extra tell time must not turn into a point-blank release at
-					# high speed. New craft hold their firing line outside22m.
+					# high speed. Restored craft use their original charging advance.
 					enemy.position.z = minf(-22.0,enemy.position.z+(speed*0.10+0.7)*sim_dt)
 				else:
 					enemy.position.z += (speed * 0.25 + 2.0) * sim_dt
 				if phase >= 1.0:
-					var fire_duration := 0.60 if enemy.enemy_kind == "interceptor" else (0.30 if enemy.enemy_kind == "mine_layer" else 0.22)
+					var fire_duration := 0.50 if enemy.enemy_kind == "interceptor" else (0.30 if enemy.enemy_kind == "mine_layer" else 0.22)
 					_set_enemy_action(enemy, "ranged_fire", fire_duration)
 			"ranged_fire":
 				if enemy.enemy_kind == "interceptor":
 					var shot_index: int = int(enemy.get_meta("burst_shots",0))
-					while shot_index < 2 and phase >= 0.18 + float(shot_index)*0.27:
+					while shot_index < 3 and phase >= 0.18 + float(shot_index)*0.20:
 						_fire_ranged_payload(enemy,shot_index)
 						shot_index += 1
 						enemy.set_meta("burst_shots",shot_index)
@@ -1449,7 +1446,7 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 					enemy.set_meta("impact_done", true)
 					_fire_ranged_payload(enemy)
 				if phase >= 1.0:
-					enemy.fire_timer = 4.2 if enemy.enemy_kind == "shield_drone" else (4.8 if enemy.enemy_kind == "mine_layer" else (3.8 if enemy.enemy_kind == "interceptor" else 2.5))
+					enemy.fire_timer = 4.2 if enemy.enemy_kind == "shield_drone" else (3.1 if enemy.enemy_kind == "mine_layer" else 2.5)
 					_set_enemy_action(enemy, "run", 1.0)
 			"exit":
 				enemy.position.z += (speed * 0.9 + 6.0) * sim_dt

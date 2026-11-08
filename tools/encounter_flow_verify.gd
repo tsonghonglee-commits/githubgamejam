@@ -268,7 +268,7 @@ func _verify_new_flyer_pressure() -> void:
 			game.speed = 18.0 if gear_value==1 else 60.0
 			game.gear = gear_value
 			var enemy = game._spawn_enemy(kind,1,-34.0)
-			var extra := 0.65 if kind=="interceptor" else 0.85
+			var extra := 0.0
 			enemy.set_meta("first_charge_extra",extra)
 			var clock := 0.0
 			var charge_started := -1.0
@@ -298,22 +298,26 @@ func _verify_new_flyer_pressure() -> void:
 				if charge_ended>=0.0 and action!="ranged_fire":
 					exited_fire = true
 					break
-			var minimum := (0.85 if kind=="interceptor" else 1.25)+extra
+			var minimum := (0.52 if kind=="interceptor" else 0.96)+extra
 			var actual_charge := charge_ended-charge_started
 			expect(exited_fire and charge_started>=0 and declared_charge>=minimum-0.001 and actual_charge>=minimum-DT*2.0 and is_zero_approx(float(enemy.get_meta("first_charge_extra",-1.0))),kind+" gear"+str(gear_value)+" first attack gives its real full charge plus one-time formation tell",{"declared":declared_charge,"observed":actual_charge,"minimum":minimum})
-			var far_release := releases.size()==2
-			var actual_mouths := releases.size()==2
+			var advancing_release := releases.size()==3
+			var actual_mouths := releases.size()==3
 			for release: Dictionary in releases:
-				far_release = far_release and float(release.actor_z)<=-22.0+0.001 and float(release.origin_z)<=-21.0
+				advancing_release = advancing_release and float(release.actor_z)>-34.0 and float(release.actor_z)<-13.0
 				actual_mouths = actual_mouths and bool(release.source_matches) and float(release.mouth_distance)<0.04 and release.velocity.is_finite() and release.velocity.z>0 and str(release.kind)==("bolt" if kind=="interceptor" else "mine")
-			expect(far_release,kind+" gear"+str(gear_value)+" holds its body at least22m away and its actual muzzle at least21m away throughout release",{"releases":releases})
-			expect(actual_mouths and game.health==5,kind+" gear"+str(gear_value)+" releases only two tangible rounds from surviving real mouths without animation damage")
+			expect(advancing_release,kind+" gear"+str(gear_value)+" restores its original advancing charge instead of the22m hold",{"releases":releases})
+			expect(actual_mouths and game.health==5,kind+" gear"+str(gear_value)+" releases three tangible rounds from surviving real mouths without animation damage")
 			if kind=="interceptor":
-				var gap: float = float(releases[1].time)-float(releases[0].time) if releases.size()==2 else 0.0
-				expect(gap>=0.14 and gap<=0.19,kind+" gear"+str(gear_value)+" two short shots are separated rather than a stacked or phantom third release",{"gap":gap})
+				var gap: float = float(releases[1].time)-float(releases[0].time) if releases.size()==3 else 0.0
+				var second_gap: float = float(releases[2].time)-float(releases[1].time) if releases.size()==3 else 0.0
+				expect(gap>=0.09 and gap<=0.11 and second_gap>=0.09 and second_gap<=0.11,kind+" gear"+str(gear_value)+" restores all three timed releases about0.10s apart",{"gaps":[gap,second_gap]})
 			else:
-				var distinct := releases.size()==2 and Vector3(releases[0].origin).distance_to(Vector3(releases[1].origin))>0.1 and Vector3(releases[0].velocity).normalized().distance_to(Vector3(releases[1].velocity).normalized())>0.01
-				expect(distinct,kind+" gear"+str(gear_value)+" uses two distinct physical launch bays and approach lines")
+				var distinct := releases.size()==3
+				for first in range(releases.size()):
+					for second in range(first+1,releases.size()):
+						distinct = distinct and Vector3(releases[first].origin).distance_to(Vector3(releases[second].origin))>0.1 and Vector3(releases[first].velocity).normalized().distance_to(Vector3(releases[second].velocity).normalized())>0.01
+				expect(distinct,kind+" gear"+str(gear_value)+" restores all three distinct surviving physical launch bays and approach lines")
 			rows.append({"kind":kind,"gear":gear_value,"extra":extra,"declared_charge":declared_charge,"actual_charge":actual_charge,"releases":releases})
 			await process_frame
 	observations["new_flyer_pressure"] = rows

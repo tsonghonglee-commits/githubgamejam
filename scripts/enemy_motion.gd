@@ -148,7 +148,7 @@ static func sample_space_flyer(kind: String, time: float, lane: int, action: Str
 	if action == "ranged_fire":
 		aim = 1.0-smoothstep(0.62,1.0,p)
 		if kind == "interceptor":
-			for shot in [0.18,0.45]:
+			for shot in [0.18,0.38,0.58]:
 				kick = maxf(kick,_launch_pulse(p,float(shot),0.13))
 		else:
 			kick = _launch_pulse(p,0.25,0.32)

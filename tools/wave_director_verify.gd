@@ -90,13 +90,13 @@ func _special_slots() -> void:
 		var after: Dictionary = Director.plan(int(item.index),float(item.time)/180.0,18.0,180.0)
 		gated = gated and before.spawns[0].kind == "ranged" and not before.advanced_intro and after.spawns[0].kind == item.kind and after.advanced_intro
 		rare = rare and after.spawns.size() == 1 and not after.hold_until_clear and is_equal_approx(float(after.interval),3.5)
-		notice = notice and is_equal_approx(float(after.spawns[0].fire_delay),0.85 if item.kind == "mine_layer" else 0.65)
+		notice = notice and is_zero_approx(float(after.spawns[0].fire_delay))
 	for index in [1,49,61,73]:
 		var value: Dictionary = Director.plan(index,1.0,18.0,180.0)
 		rare = rare and not value.advanced_intro
 	expect(gated,"only the13/25/37 ranged slots become advanced craft after50/90/130seconds")
 	expect(rare,"advanced replacements are single-slot substitutions and do not recur each sequence loop")
-	expect(notice,"the rare new craft retain their agreed extra first-shot notice")
+	expect(notice,"restored craft do not receive the post097 extra first-shot delay")
 	var row: Dictionary = Director.plan(22,0.5,18.0,180.0)
 	var lanes: Array = []
 	var delays: Array = []
