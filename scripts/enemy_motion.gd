@@ -148,7 +148,7 @@ static func sample_space_flyer(kind: String, time: float, lane: int, action: Str
 	if action == "ranged_fire":
 		aim = 1.0-smoothstep(0.62,1.0,p)
 		if kind == "interceptor":
-			for shot in [0.18,0.38,0.58]:
+			for shot in [0.18,0.45]:
 				kick = maxf(kick,_launch_pulse(p,float(shot),0.13))
 		else:
 			kick = _launch_pulse(p,0.25,0.32)
@@ -181,7 +181,13 @@ static func sample_space_flyer(kind: String, time: float, lane: int, action: Str
 		match kind:
 			"shield_drone":
 				hinge = Vector3(side*0.30,2.24,-0.05)
-				wing_angles = Vector3(0,side*(0.025+0.20*aim),side*0.018*sin(time*2.2))
+				# Opening the real leaves exposes the central material root. Keep
+				# that opening through the shot and most of recovery; the end of
+				# recovery closes continuously into the next idle/charge pose.
+				var shield_open := smoothstep(0.12,0.82,p) if action == "ranged_charge" else 0.0
+				if action == "ranged_fire": shield_open = 1.0
+				elif action == "recover": shield_open = 1.0-smoothstep(0.65,1.0,p)
+				wing_angles = Vector3(0,side*(0.025+0.525*shield_open),side*0.018*sin(time*2.2))
 			"interceptor":
 				hinge = Vector3(side*0.28,2.16,-0.13)
 				wing_angles = Vector3(-0.06*aim,side*0.04*aim,side*(0.11*aim+0.03*sin(time*3.7)))

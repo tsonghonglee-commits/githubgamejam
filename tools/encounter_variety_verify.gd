@@ -112,7 +112,7 @@ func _verify_firing(kind: String) -> void:
 			previous = game.projectiles.size()
 		if str(enemy.get_meta("action_state","")) != "ranged_fire":
 			break
-	var expected_count := 1 if kind == "shield_drone" else 3
+	var expected_count := 1 if kind == "shield_drone" else 2
 	var valid_payload := true
 	var trajectories: Array[Vector3] = []
 	for shot: Dictionary in game.projectiles:
@@ -120,10 +120,14 @@ func _verify_firing(kind: String) -> void:
 		trajectories.append(shot.velocity.normalized())
 	expect(game.projectiles.size() == expected_count and valid_payload,kind+" releases its own finite three-dimensional payload from the firing state",{"shots":game.projectiles.size(),"release_times":times,"release_sizes":releases})
 	if kind == "interceptor":
-		expect(times.size() == 3 and times[2]-times[0] > 0.12,kind+" point fire is three distinct readable releases instead of one stacked volley",{"release_times":times})
+		var spacing := times[1]-times[0] if times.size() == 2 else -1.0
+		expect(times.size() == 2 and spacing >= 0.15 and spacing <= 0.18,kind+" point fire has two readable releases about 0.16s apart instead of a stacked volley",{"release_times":times,"spacing":spacing})
 	elif kind == "mine_layer":
-		var spread := trajectories.size()==3 and (trajectories[0].distance_to(trajectories[1]) > 0.01 or trajectories[1].distance_to(trajectories[2]) > 0.01)
-		expect(spread,kind+" fans its three solid mines along genuinely different flight directions",{"directions":trajectories.map(func(value): return str(value))})
+		var launch_origins: Array[Vector3] = []
+		for shot: Dictionary in game.projectiles: launch_origins.append(shot.node.global_position)
+		var spread := trajectories.size() == 2 and trajectories[0].distance_to(trajectories[1]) > 0.01
+		var distinct_sources := launch_origins.size() == 2 and launch_origins[0].distance_to(launch_origins[1]) > 0.1
+		expect(spread and distinct_sources,kind+" releases two solid mines from distinct real launch mouths along different flight directions",{"directions":trajectories.map(func(value): return str(value)),"launch_origins":launch_origins.map(func(value): return str(value))})
 	expect(game.health == 5 and enemy.get_remaining_voxel_count() > 600,kind+" firing animation itself does not damage the player or consume its body")
 
 

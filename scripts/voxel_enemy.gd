@@ -1210,6 +1210,30 @@ func get_remaining_voxel_count(include_fragments: bool = true) -> int:
 	return count
 
 
+func retire_for_encounter(camera: Camera3D) -> void:
+	# A chapter handoff is not a sword hit or a structural kill. Preserve
+	# material and dead state until this detached visual owner is freed.
+	if bool(get_meta("retirement_burst_done",false)): return
+	set_meta("retirement_burst_done",true)
+	set_meta("encounter_retired",true)
+	resolved = true
+	_configured = false
+	var sources := PackedVector3Array()
+	var stride := maxi(1,int(_live_indices.size()/12))
+	for offset in range(0,_live_indices.size(),stride):
+		var index: int = _live_indices[offset]
+		if _voxels[index] == 0: continue
+		sources.append(_posed_world_point(index))
+		if sources.size() >= 12: break
+	if not sources.is_empty():
+		DebrisScript.emit_cut_particles(self,camera,sources,Vector2(0,-1),_cell,"body")
+	if is_instance_valid(_rig): _rig.visible = false
+	for child in get_children():
+		if child is Node3D and (child.get_meta("voxel_piece",false) or child.get_meta("cut_chip",false)):
+			child.visible = false
+	set_process(false)
+
+
 func blast_at(world_point: Vector3, radius: float) -> Dictionary:
 	if dead or not _configured or radius <= 0.0:
 		return {"removed": 0, "killed": false}
@@ -1332,7 +1356,9 @@ func _cut_body(camera: Camera3D, points: PackedVector2Array, power: float, blade
 			stroke = direction
 	var cut_indices := PackedInt32Array()
 	var depth_budget: int = _dimensions.z
-	if enemy_kind in ["tank","shield_drone"]:
+	if enemy_kind == "shield_drone":
+		depth_budget = clampi(int(floor(power * 2.0)), 2, _dimensions.z)
+	elif enemy_kind == "tank":
 		depth_budget = clampi(int(floor(power * 1.40)), 1, _dimensions.z)
 	elif enemy_kind == "boss":
 		depth_budget = clampi(int(floor(power * 1.25)), 1, _dimensions.z)

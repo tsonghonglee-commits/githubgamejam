@@ -9,6 +9,7 @@ const TouchScript = preload("res://scripts/touch_controls.gd")
 const ProjectileScript = preload("res://scripts/projectile_view.gd")
 const BlastScript = preload("res://scripts/voxel_blast.gd")
 const RouteScript = preload("res://scripts/route_sections.gd")
+const EncounterScript = preload("res://scripts/encounter_director.gd")
 const MAX_PROJECTILES := 24
 const MAX_BLASTS := 12
 const ENEMY_RUN_SPEED := 2.8
@@ -16,7 +17,6 @@ const PROJECTILE_SPEED_SCALE: float = 2.0 / 3.0
 const REFLECTED_BLAST_RADII := {"bolt":0.90,"shock":1.15,"missile":1.45,"mine":1.25}
 const FLYING_ENEMIES := ["drone","missile_drone","shield_drone","interceptor","mine_layer"]
 const RANGED_ENEMIES := ["ranged","drone","missile_drone","shield_drone","interceptor","mine_layer"]
-const ENCOUNTER_SEQUENCE := ["normal","interceptor","shield_drone","ranged","mine_layer","barrier","tank","drone","missile_drone","beam","interceptor","normal","shield_drone","mine_layer","tank","ranged"]
 const MIN_SPEED: float = 4.0
 const BASE_SPEED: float = 18.0
 const MAX_SPEED: float = 60.0
@@ -72,6 +72,12 @@ var stroke_to: Vector2 = Vector2.ZERO
 var blade_path: PackedVector2Array = PackedVector2Array()
 var pending_strokes: Array = []
 var enemies: Array = []
+var retiring_enemies: Array[Dictionary] = []
+var wave_needs_clear := false
+var wave_quiet_time := 0.0
+var wave_recovery_time := 1.0
+var boss_support_window := 0
+var boss_support_side := -1
 var projectiles: Array = []
 var blasts: Array = []
 var road_segments: Array[Node3D] = []
@@ -156,7 +162,7 @@ func _ready() -> void:
 	EnemyScript.prewarm_models(["tank", "ranged", "boss", "drone", "missile_drone", "barrier", "beam", "shield_drone", "interceptor", "mine_layer"])
 	_build_menu_showcase()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	print("Slay the highway / 杀路 v0.9.7 squadrons ready | Godot ", Engine.get_version_info().string)
+	print("Slay the highway / 杀路 v0.9.8 encounters ready | Godot ", Engine.get_version_info().string)
 	if "--preview" in OS.get_cmdline_user_args():
 		start_game()
 		_spawn_enemy("normal", 1, -10.0)
@@ -239,14 +245,12 @@ func _input(event: InputEvent) -> void:
 				_notice("练习模式：生命保留至少一格" if practice else "标准模式：五格生命", 3.0)
 			KEY_F3:
 				if state == "playing":
+					if boss_spawned and is_instance_valid(boss_enemy) and not boss_enemy.dead:
+						return
 					training = false
-					for enemy in enemies:
-						enemy.queue_free()
-					enemies.clear()
-					_clear_projectiles()
 					boss_spawned = false
 					boss_enemy = null
-					elapsed = ROUTE_DURATION
+					elapsed = route_duration
 					_spawn_boss()
 			KEY_F4:
 				_start_cutting_lab()
@@ -331,6 +335,7 @@ func mobile_look_drag(movement: Vector2) -> void:
 
 
 func start_game() -> void:
+	_clear_retiring_enemies()
 	start_when_menu_prepared = false
 	if is_instance_valid(menu_showcase):
 		menu_showcase.visible = false
@@ -358,6 +363,11 @@ func start_game() -> void:
 	game_clock = 0.0
 	wave_index = 0
 	spawn_timer = 2.8
+	wave_needs_clear = false
+	wave_quiet_time = 0.0
+	wave_recovery_time = 1.0
+	boss_support_window = 0
+	boss_support_side = -1
 	boss_spawned = false
 	boss_enemy = null
 	boss_timer = 2.5
@@ -544,6 +554,7 @@ func _start_game_from_ui(reset_mode: bool = true) -> void:
 
 
 func _return_to_menu() -> void:
+	_clear_retiring_enemies()
 	if slashing:
 		_consume_strokes()
 	_reset_input()
@@ -732,6 +743,7 @@ func _process(delta: float) -> void:
 		_update_camera(delta)
 		_update_impact_effects(sim_dt, 0.0 if stopped else delta)
 		_update_blasts(sim_dt)
+		_update_retiring_enemies(sim_dt,world_scale)
 		if not training:
 			_update_road(sim_dt)
 		if slashing:
@@ -764,6 +776,8 @@ func _process(delta: float) -> void:
 		for enemy in enemies:
 			if is_instance_valid(enemy):
 				enemy.set_meta("simulation_scale", 0.0)
+		for row in retiring_enemies:
+			if is_instance_valid(row.enemy): row.enemy.set_meta("simulation_scale",0.0)
 	_update_hud()
 
 
@@ -931,7 +945,7 @@ func _cut_path(points: PackedVector2Array, continuous: bool) -> void:
 	cut_serial += 1
 	stroke_alpha = 1.0
 	var power: float = 0.75 + float(gear) * 0.35
-	for enemy in enemies:
+	for enemy in enemies.duplicate():
 		if not is_instance_valid(enemy):
 			continue
 		if enemy.position.z < -32.0 or enemy.position.z > -0.5:
@@ -1061,22 +1075,40 @@ func _update_spawning(sim_dt: float) -> void:
 			_spawn_boss()
 		return
 	spawn_timer -= sim_dt
+	if wave_needs_clear:
+		if _has_pending_wave_enemies():
+			wave_quiet_time = 0.0
+		else:
+			wave_quiet_time += sim_dt
 	if spawn_timer > 0.0:
 		return
-	var kind: String = ENCOUNTER_SEQUENCE[wave_index % ENCOUNTER_SEQUENCE.size()]
-	var lane: int = [1, 2, 0, 3, 2, 1, 0, 2][wave_index % 8]
-	if kind == "tank":
-		lane = 0 if wave_index % 2 == 0 else 2
-	var z_distance: float = -maxf(40.0, speed * 2.0 + 12.0)
-	_spawn_enemy(kind, lane, z_distance)
+	if wave_needs_clear and wave_quiet_time < wave_recovery_time:
+		return
+	var plan: Dictionary = EncounterScript.plan(wave_index,elapsed/maxf(route_duration,1.0),speed)
+	_spawn_encounter_wave(plan)
 	wave_index += 1
-	spawn_timer = 4.3 if elapsed < 40.0 else 3.5
-	# A support craft arrives behind the lead instead of overlapping three
-	# attacks at one instant. The role pairing changes the encounter's rhythm.
-	if elapsed > 45.0 and wave_index % 5 == 0 and kind not in ["barrier","beam"]:
-		var support := "interceptor" if kind == "shield_drone" else "drone"
-		_spawn_enemy(support, (lane + 2) % 4, z_distance - 20.0)
-		_record_combat("formation",null,{"lead_kind":kind,"support_kind":support})
+	spawn_timer = float(plan.interval)
+	wave_needs_clear = bool(plan.hold_until_clear)
+	wave_quiet_time = 0.0
+	wave_recovery_time = float(plan.recovery_seconds)
+
+
+func _has_pending_wave_enemies() -> bool:
+	for enemy in enemies:
+		if is_instance_valid(enemy) and not enemy.dead and not enemy.resolved and not bool(enemy.get_meta("encounter_retired",false)):
+			return true
+	return false
+
+
+func _spawn_encounter_wave(plan: Dictionary) -> void:
+	var z_distance := -maxf(44.0,(speed+ENEMY_RUN_SPEED)*float(plan.lead_seconds)+13.0)
+	for item: Dictionary in plan.spawns:
+		var enemy = _spawn_enemy(str(item.kind),int(item.lane),z_distance+float(item.z_offset))
+		enemy.set_meta("wave_id",str(plan.id))
+		enemy.set_meta("encounter_role",str(item.role))
+		enemy.set_meta("wave_attack_delay",float(item.attack_delay))
+		enemy.set_meta("first_charge_extra",float(item.fire_delay))
+	_record_combat("wave",null,{"wave_id":plan.id,"wave_index":wave_index,"count":plan.spawns.size(),"stage":plan.stage})
 
 
 func _spawn_enemy(kind: String, lane: int, z_position: float) -> Node3D:
@@ -1107,11 +1139,80 @@ func _spawn_enemy(kind: String, lane: int, z_position: float) -> Node3D:
 func _spawn_boss() -> void:
 	if boss_spawned:
 		return
+	victory_timer = -1.0
+	# Retiring is a staged visual exit, never a player kill or a sphere that
+	# might hit the player, sever the old Boss, or cascade through callbacks.
+	_clear_projectiles()
+	_clear_blasts()
+	for effect in impact_effects:
+		if is_instance_valid(effect.node): effect.node.queue_free()
+	impact_effects.clear()
+	_retire_route_enemies()
 	boss_spawned = true
+	boss_support_window = 0
+	boss_support_side = -1
 	boss_enemy = _spawn_enemy("boss", 0, -12.0)
 	boss_timer = 3.2
-	_set_enemy_action(boss_enemy, "recover", 1.4)
+	_set_enemy_action(boss_enemy, "recover", 2.1)
+	for side in [-1,1]:
+		var escort = _spawn_enemy("shield_drone",0 if side < 0 else 3,-13.5)
+		escort.scale = Vector3.ONE*0.70
+		escort.position.x = float(side)*3.8
+		escort.set_meta("lane_x",escort.position.x)
+		escort.set_meta("boss_escort",true)
+		escort.set_meta("escort_side",side)
+		escort.set_meta("escort_window_seen",0)
+		escort.set_meta("encounter_role","boss_escort")
+	_record_combat("boss_formation",boss_enemy,{"escorts":2})
 	_record_combat("boss_enter", boss_enemy)
+
+
+func _retire_route_enemies(escorts_only: bool = false) -> void:
+	var order := 0
+	for enemy in enemies.duplicate():
+		if not is_instance_valid(enemy): continue
+		if escorts_only and not bool(enemy.get_meta("boss_escort",false)): continue
+		if enemy.severed.is_connected(_on_enemy_severed): enemy.severed.disconnect(_on_enemy_severed)
+		if enemy.damaged.is_connected(_on_enemy_damaged): enemy.damaged.disconnect(_on_enemy_damaged)
+		enemy.resolved = true
+		enemy._configured = false
+		enemy.set_meta("encounter_retired",true)
+		enemy.set_process(false)
+		enemy.pulse_warning(1.0)
+		enemies.erase(enemy)
+		retiring_enemies.append({"enemy":enemy,"age":0.0,"delay":float(order)*0.10,"exploded":false,"was_dead":bool(enemy.dead)})
+		_record_combat("encounter_retire",enemy,{"boss_cleanup":escorts_only})
+		order += 1
+
+
+func _update_retiring_enemies(sim_dt: float, world_scale: float) -> void:
+	for index in range(retiring_enemies.size()-1,-1,-1):
+		var row: Dictionary = retiring_enemies[index]
+		var enemy = row.enemy
+		if not is_instance_valid(enemy):
+			retiring_enemies.remove_at(index)
+			continue
+		row.age += sim_dt
+		enemy.set_meta("simulation_scale",world_scale)
+		enemy.set_meta("runner_speed",speed)
+		enemy.set_meta("root_motion_velocity",Vector3(0,0,speed) if sim_dt > 0.0 else Vector3.ZERO)
+		enemy.position.z += speed*sim_dt
+		if not bool(row.exploded) and float(row.age) >= float(row.delay):
+			row.exploded = true
+			var point: Vector3 = enemy.get_aim_point()
+			enemy.retire_for_encounter(camera)
+			if not bool(row.was_dead):
+				_spawn_blast(point,0.65,false)
+				audio.play_event("explosion",0.40)
+		if float(row.age) >= float(row.delay)+0.45:
+			enemy.queue_free()
+			retiring_enemies.remove_at(index)
+
+
+func _clear_retiring_enemies() -> void:
+	for row in retiring_enemies:
+		if is_instance_valid(row.enemy): row.enemy.queue_free()
+	retiring_enemies.clear()
 
 
 func _set_enemy_action(enemy, action: String, duration: float) -> void:
@@ -1151,6 +1252,9 @@ func _start_melee(enemy, second: bool = false) -> void:
 	if second:
 		duration = 0.50
 	duration *= 1.0 - float(gear - 1) * 0.05
+	if not second and not bool(enemy.get_meta("wave_attack_delay_used",false)):
+		duration += float(enemy.get_meta("wave_attack_delay",0.0))
+		enemy.set_meta("wave_attack_delay_used",true)
 	enemy.set_meta("action_variant", 1 if second else 0)
 	if enemy.has_method("set_action_variant"):
 		enemy.set_action_variant(1 if second else 0)
@@ -1160,9 +1264,9 @@ func _start_melee(enemy, second: bool = false) -> void:
 
 func _ranged_charge_duration(kind: String) -> float:
 	match kind:
-		"shield_drone": return 0.88
-		"interceptor": return 0.52
-		"mine_layer": return 0.96
+		"shield_drone": return 1.15
+		"interceptor": return 0.85
+		"mine_layer": return 1.25
 		"missile_drone": return 0.85
 	return 0.65
 
@@ -1178,7 +1282,10 @@ func _fire_ranged_payload(enemy, burst_index: int = 0) -> bool:
 		"interceptor":
 			_spawn_projectile(origins[burst_index % origins.size()],"bolt",enemy)
 		"mine_layer":
-			for origin in origins:
+			var salvo: int = int(enemy.get_meta("mine_salvos",0))
+			enemy.set_meta("mine_salvos",salvo+1)
+			for slot in range(mini(2,origins.size())):
+				var origin: Vector3 = origins[(salvo+slot)%origins.size()]
 				# Separate approach lines converge inside the player's physical
 				# near-body zone; none appears to miss sideways and still hits.
 				var spread := Vector3(clampf((origin.x-enemy.global_position.x)*0.16,-0.18,0.18),clampf((origin.y-2.0)*0.30,-0.10,0.10),0)
@@ -1193,6 +1300,7 @@ func _fire_ranged_payload(enemy, burst_index: int = 0) -> bool:
 
 func _update_enemies(sim_dt: float, world_scale: float) -> void:
 	for index in range(enemies.size() - 1, -1, -1):
+		if index >= enemies.size(): continue
 		var enemy = enemies[index]
 		if not is_instance_valid(enemy):
 			enemies.remove_at(index)
@@ -1223,6 +1331,9 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 			enemy.set_meta("root_motion_velocity", Vector3.ZERO)
 			_update_boss(enemy, sim_dt)
 			continue
+		if bool(enemy.get_meta("boss_escort",false)):
+			_update_boss_escort(enemy,sim_dt)
+			continue
 		if enemy.enemy_kind in ["barrier","beam"]:
 			# Static route fixtures must be cut, rather than parried like attacks.
 			enemy.position.z += speed * sim_dt
@@ -1241,13 +1352,16 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 		var phase: float = _advance_enemy_action(enemy, sim_dt)
 		match action:
 			"run":
-				var advance_scale := 0.80 if enemy.enemy_kind == "shield_drone" else (1.12 if enemy.enemy_kind == "interceptor" else (0.62 if enemy.enemy_kind == "mine_layer" else 1.0))
+				var advance_scale := 0.80 if enemy.enemy_kind == "shield_drone" else (0.90 if enemy.enemy_kind == "interceptor" else (0.62 if enemy.enemy_kind == "mine_layer" else 1.0))
 				enemy.position.z += (speed * advance_scale + ENEMY_RUN_SPEED) * sim_dt
 				enemy.fire_timer -= sim_dt
 				if not enemy.resolved and enemy.position.z >= -13.0:
 					_start_melee(enemy)
 				elif enemy.enemy_kind in RANGED_ENEMIES and enemy.position.z >= -34.0 and enemy.fire_timer <= 0.0:
-					_set_enemy_action(enemy, "ranged_charge", _ranged_charge_duration(enemy.enemy_kind))
+					var first_extra: float = float(enemy.get_meta("first_charge_extra",0.0))
+					enemy.set_meta("first_charge_extra",0.0)
+					enemy.set_meta("ranged_standoff",first_extra > 0.0)
+					_set_enemy_action(enemy, "ranged_charge", _ranged_charge_duration(enemy.enemy_kind)+first_extra)
 					audio.play_event("ranged_charge", 0.8)
 					_record_combat("ranged_charge", enemy)
 			"windup":
@@ -1290,14 +1404,19 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 					else:
 						_set_enemy_action(enemy, "exit", 1.0)
 			"ranged_charge":
-				enemy.position.z += (speed * 0.25 + 2.0) * sim_dt
+				if enemy.enemy_kind in ["shield_drone","interceptor","mine_layer"] or bool(enemy.get_meta("ranged_standoff",false)):
+					# Extra tell time must not turn into a point-blank release at
+					# high speed. New craft hold their firing line outside22m.
+					enemy.position.z = minf(-22.0,enemy.position.z+(speed*0.10+0.7)*sim_dt)
+				else:
+					enemy.position.z += (speed * 0.25 + 2.0) * sim_dt
 				if phase >= 1.0:
-					var fire_duration := 0.50 if enemy.enemy_kind == "interceptor" else (0.30 if enemy.enemy_kind == "mine_layer" else 0.22)
+					var fire_duration := 0.60 if enemy.enemy_kind == "interceptor" else (0.30 if enemy.enemy_kind == "mine_layer" else 0.22)
 					_set_enemy_action(enemy, "ranged_fire", fire_duration)
 			"ranged_fire":
 				if enemy.enemy_kind == "interceptor":
 					var shot_index: int = int(enemy.get_meta("burst_shots",0))
-					while shot_index < 3 and phase >= 0.18 + float(shot_index)*0.20:
+					while shot_index < 2 and phase >= 0.18 + float(shot_index)*0.27:
 						_fire_ranged_payload(enemy,shot_index)
 						shot_index += 1
 						enemy.set_meta("burst_shots",shot_index)
@@ -1305,7 +1424,7 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 					enemy.set_meta("impact_done", true)
 					_fire_ranged_payload(enemy)
 				if phase >= 1.0:
-					enemy.fire_timer = 2.8 if enemy.enemy_kind == "shield_drone" else (3.1 if enemy.enemy_kind == "mine_layer" else 2.5)
+					enemy.fire_timer = 4.2 if enemy.enemy_kind == "shield_drone" else (4.8 if enemy.enemy_kind == "mine_layer" else (3.8 if enemy.enemy_kind == "interceptor" else 2.5))
 					_set_enemy_action(enemy, "run", 1.0)
 			"exit":
 				enemy.position.z += (speed * 0.9 + 6.0) * sim_dt
@@ -1325,6 +1444,49 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 			enemies.remove_at(index)
 
 
+func _armed_boss_escort(side: int):
+	for enemy in enemies:
+		if is_instance_valid(enemy) and not enemy.dead and bool(enemy.get_meta("boss_escort",false)) and int(enemy.get_meta("escort_side",0)) == side and enemy.has_attack_limb():
+			return enemy
+	return null
+
+
+func _update_boss_escort(enemy, sim_dt: float) -> void:
+	if not is_instance_valid(boss_enemy) or boss_enemy.dead or victory_timer >= 0.0:
+		_retire_route_enemies(true)
+		return
+	var side: int = int(enemy.get_meta("escort_side",-1))
+	enemy.position = boss_enemy.position+Vector3(float(side)*3.8,0,-1.5)
+	enemy.set_meta("root_motion_velocity",Vector3.ZERO)
+	enemy.set_meta("flythrough_enabled",false)
+	var action: String = str(enemy.get_meta("action_state","run"))
+	var phase: float = _advance_enemy_action(enemy,sim_dt)
+	var window: int = int(boss_enemy.get_meta("escort_support_window",0))
+	var window_open: bool = str(boss_enemy.get_meta("action_state","")) == "recover" and window > 0
+	match action:
+		"run":
+			if window_open and window > int(enemy.get_meta("escort_window_seen",0)):
+				enemy.set_meta("escort_window_seen",window)
+				if int(boss_enemy.get_meta("escort_support_side",0)) == side and enemy.has_attack_limb():
+					_set_enemy_action(enemy,"ranged_charge",1.15)
+					_record_combat("escort_charge",enemy,{"support_window":window})
+		"ranged_charge":
+			if not window_open:
+				_set_enemy_action(enemy,"recover",0.80)
+			elif phase >= 1.0:
+				_set_enemy_action(enemy,"ranged_fire",0.30)
+		"ranged_fire":
+			if window_open and phase >= 0.25 and not bool(enemy.get_meta("impact_done",false)):
+				enemy.set_meta("impact_done",true)
+				_fire_ranged_payload(enemy)
+			if phase >= 1.0 or not window_open:
+				_set_enemy_action(enemy,"recover",0.80)
+		"recover", "stagger":
+			if phase >= 1.0: _set_enemy_action(enemy,"run",1.0)
+	enemy.set_action(str(enemy.get_meta("action_state","run")),float(enemy.get_meta("action_phase",0.0)))
+	enemy.pulse_warning(phase if action == "ranged_charge" else 0.0)
+
+
 func _update_boss(enemy, sim_dt: float) -> void:
 	var reactor_state: Dictionary = enemy.get_boss_reactor_state() if enemy.has_method("get_boss_reactor_state") else {}
 	var connected: int = int(reactor_state.get("connected",2))
@@ -1340,6 +1502,7 @@ func _update_boss(enemy, sim_dt: float) -> void:
 	match action:
 		"run", "recover", "stagger":
 			if phase >= 1.0:
+				enemy.set_meta("escort_support_window",0)
 				boss_pattern += 1
 				var variant: int = boss_pattern % 3
 				enemy.set_meta("action_variant", variant)
@@ -1367,7 +1530,19 @@ func _update_boss(enemy, sim_dt: float) -> void:
 				if enemy.has_attack_limb(variant):
 					_record_combat("attack_impact", enemy, {"variant": variant, "projectile": true})
 			if phase >= 1.0:
-				_set_enemy_action(enemy, "recover", 1.25 - float(gear - 1) * 0.12 - (0.18 if enraged else 0.0))
+				var recovery := 1.25-float(gear-1)*0.12-(0.18 if enraged else 0.0)
+				enemy.set_meta("escort_support_window",0)
+				if boss_pattern % 3 == 0:
+					var selected_side := boss_support_side
+					if _armed_boss_escort(selected_side) == null: selected_side = -selected_side
+					if _armed_boss_escort(selected_side) != null:
+						boss_support_window += 1
+						enemy.set_meta("escort_support_window",boss_support_window)
+						enemy.set_meta("escort_support_side",selected_side)
+						boss_support_side = -selected_side
+						recovery = 2.40
+						_record_combat("boss_support_window",enemy,{"support_window":boss_support_window,"side":selected_side})
+				_set_enemy_action(enemy,"recover",recovery)
 
 
 func _record_combat(event_name: String, enemy: Node3D = null, details: Dictionary = {}) -> void:
@@ -1616,6 +1791,7 @@ func _on_enemy_severed(enemy: Node3D, point: Vector3, removed_count: int) -> voi
 	if enemy == boss_enemy:
 		victory_timer = 2.4
 		_clear_projectiles()
+		_retire_route_enemies(true)
 		_notice("核心已断 · 继续斩碎残骸", 2.4)
 
 

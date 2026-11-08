@@ -10,7 +10,7 @@ const REVIEW_SOURCE_PATHS: Array[String] = [
 	"res://scripts/prototype_hud.gd", "res://scripts/prototype_audio.gd",
 	"res://scripts/projectile_view.gd", "res://scripts/voxel_blast.gd",
 	"res://scripts/route_sections.gd", "res://scripts/projectile_geometry.gd",
-	"res://scripts/enemy_motion.gd", "res://scripts/touch_controls.gd", "res://scripts/enemy_archetypes.gd",
+	"res://scripts/enemy_motion.gd", "res://scripts/touch_controls.gd", "res://scripts/enemy_archetypes.gd", "res://scripts/encounter_director.gd",
 ]
 
 var game

@@ -933,7 +933,19 @@ func _run() -> void:
 	boss_key.pressed = true
 	game._input(boss_key)
 	game._input(boss_key)
-	expect(game.enemies.size() == 1 and is_instance_valid(game.boss_enemy) and not game.boss_enemy.is_queued_for_deletion(), "repeated boss shortcut always leaves a live encounter")
+	var shortcut_bosses := 0
+	var shortcut_escorts := 0
+	var shortcut_other := 0
+	for actor in game.enemies:
+		if not is_instance_valid(actor) or actor.dead or actor.is_queued_for_deletion():
+			shortcut_other += 1
+		elif actor.enemy_kind == "boss" and actor == game.boss_enemy:
+			shortcut_bosses += 1
+		elif actor.enemy_kind == "shield_drone" and bool(actor.get_meta("boss_escort",false)):
+			shortcut_escorts += 1
+		else:
+			shortcut_other += 1
+	expect(game.enemies.size() == 3 and shortcut_bosses == 1 and shortcut_escorts == 2 and shortcut_other == 0 and is_instance_valid(game.boss_enemy) and not game.boss_enemy.is_queued_for_deletion(), "repeated boss shortcut keeps exactly one live Boss and its two shield escorts without duplicates")
 	clear_targets()
 	# Boss severing has already earned the win; a surviving strike cannot damage
 	# the player during the short, re-cuttable debris showcase.
