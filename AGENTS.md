@@ -1,6 +1,8 @@
 # 项目协作约定
 
 - 与用户使用简体中文沟通。先读 README.md、docs/DESIGN.md 和 docs/JAM_CHECKLIST.md。
+- Boss 互动建筑的造型和配色由项目现有关卡直接取材并手工制作，停用此前用于这项工作的建筑 Skill。
+- 《杀路》停用体素特效 Skill（`slay-voxel-effects`）。特效改动按用户明确指定的范围处理。
 - 固定使用本机 Godot 4.7.2 stable 标准版和 GDScript。不要自行换引擎版本或引入 C#。
 - 本机可执行文件从 `.local/godot.psd1` 或 `GODOT4` 读取；不要把本机路径和凭据写进跟踪文件。
 - v0.9.17最终46源/40镜像Check/export、actual17纯加载compiled依赖/3preset、原生菜单120帧exit0、6ZIP根流SHA通过；local-performance-receipt绑定summary/source46/4冻结工具/34成功artifacts/PCKZIP，root复核源changed0/artifactmismatch0。另从各独立导出CWD用实际旧0916及新0917 PCK，固定cut规范mesh/材料均83/0，new实际PCK生成/模板隔离对旧源基线0fail，actual-local-verification.json补绑身份；不把这几次附加计时混进3对源码CPU样本。final PCK8BA0EF6C6A4179486B4AE9D90E0C6802D27A1AC0B213E2D3508F9DA89A19A54A，ZIPDC2FC7ADA2BB766EB34FA677BE2DDF2F382A83124617883F2A819DF52A9A50B3。发行与成功最终局部主日志clean；旧早期失败/音频清理诊断保留。无AI/波次/通关/整局性能或用户手感验收；详见DESIGN44及release-review-v0917/release-validation.json。

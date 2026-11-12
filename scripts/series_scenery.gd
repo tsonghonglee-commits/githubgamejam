@@ -20,6 +20,10 @@ const ORBITAL_INSET := Color("1c1b28")
 const ORBITAL_BRASS := Color("b68b4a")
 const ORBITAL_AMBER := Color(0.97,0.68,0.36,0.76)
 const ORBITAL_VIOLET := Color(0.60,0.40,0.85,0.81)
+const BOX_CORNERS: Array[Vector3] = [
+	Vector3(-1,-1,-1), Vector3(1,-1,-1), Vector3(1,1,-1), Vector3(-1,1,-1),
+	Vector3(-1,-1,1), Vector3(1,-1,1), Vector3(1,1,1), Vector3(-1,1,1),
+]
 var _game: Node3D
 var _tiles: Array[Node3D] = []
 var _visuals: Array[MeshInstance3D] = []
@@ -34,6 +38,8 @@ var _legacy_materials: Array[Dictionary] = []
 var _legacy_clip_materials: Array[ShaderMaterial] = []
 var _clip_cache: Dictionary = {}
 var _meshes: Dictionary = {}
+var _boss_terrain_meshes: Dictionary = {}
+var _boss_terrain_tiles: Dictionary = {}
 var _decks: Dictionary = {}
 var _surface: ShaderMaterial
 var _city_surface: ShaderMaterial
@@ -93,6 +99,7 @@ func configure(game: Node3D, road_segments: Array) -> void:
 		var layouts: Array[ArrayMesh] = []
 		for layout in range(LAYOUT_COUNT): layouts.append(_build_theme(theme,layout))
 		_meshes[theme] = layouts
+		_boss_terrain_meshes[theme] = _build_theme(theme,0,true)
 	for segment: Node3D in road_segments:
 		_tiles.append(segment)
 		segment.set_meta("scenery_series_id",1)
@@ -160,6 +167,7 @@ func force_series(series_id: int) -> void:
 	_boundary = -10000.0
 	_transition_blend = 0.0
 	for item: Dictionary in _legacy_materials: item.node.material_override = item.original
+	_boss_terrain_tiles.clear()
 	for index in range(_tiles.size()):
 		_assign_tile(index,series_id)
 		_incoming[index].visible = false
@@ -222,12 +230,37 @@ func warm_for_menu() -> void:
 		for layout in range(LAYOUT_COUNT):
 			_visuals[index].mesh = _meshes[theme][layout]
 			await RenderingServer.frame_post_draw
+		_visuals[index].mesh = _boss_terrain_meshes[theme]
+		await RenderingServer.frame_post_draw
 	for destination in [2,3,4]:
 		force_series(1)
 		begin_transition(destination)
 		await RenderingServer.frame_post_draw
 	force_series(1)
 	_gpu_warmed=true
+
+func architecture_material(series_id: int) -> ShaderMaterial:
+	return _city_surface if series_id == 3 else _surface
+
+
+func set_boss_terrain(tile: Node3D, series_id: int, enabled: bool) -> bool:
+	# Swap only the shared structure mesh. The deck, water, backdrop and
+	# crossing visibility stay under the district's normal ownership.
+	var index := _tiles.find(tile)
+	if index < 0: return false
+	var theme := int(tile.get_meta("scenery_series_id",1))
+	if enabled:
+		if series_id != theme or not _boss_terrain_meshes.has(theme): return false
+		if not _boss_terrain_tiles.has(tile):
+			_boss_terrain_tiles[tile] = theme
+			_visuals[index].mesh = _boss_terrain_meshes[theme]
+	elif _boss_terrain_tiles.erase(tile) and theme != 1:
+		_visuals[index].mesh = _layout_mesh(index,theme)
+	return true
+
+func _layout_mesh(index: int, theme: int) -> ArrayMesh:
+	var layout := posmod(int(_tiles[index].get_meta("layout_index",index)),LAYOUT_COUNT)
+	return _meshes[theme][layout]
 
 func _assign_tile(index: int, theme: int) -> void:
 	var tile := _tiles[index]
@@ -238,13 +271,13 @@ func _assign_tile(index: int, theme: int) -> void:
 	_visuals[index].material_override = _city_surface if theme == 3 else _surface
 	_visuals[index].cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if theme in [2,3] else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_waters[index].visible = theme == 4
-	if theme != 1: _visuals[index].mesh = _meshes[theme][posmod(int(tile.get_meta("layout_index",index)),LAYOUT_COUNT)]
+	if theme != 1: _visuals[index].mesh = _layout_mesh(index,theme)
 	var deck := tile.get_node_or_null("DeckReceiver") as MeshInstance3D
 	if deck: deck.material_override = _old_decks[index] if theme == 1 else _decks[theme]
 
 func _set_arrival(index: int, theme: int) -> void:
 	if theme == 1: return
-	_incoming[index].mesh = _meshes[theme][posmod(int(_tiles[index].get_meta("layout_index",index)),LAYOUT_COUNT)]
+	_incoming[index].mesh = _layout_mesh(index,theme)
 	_incoming[index].material_override = _city_surface if theme == 3 else _arrival_surface
 	_incoming[index].cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if theme in [2,3] else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_incoming_waters[index].visible = theme == 4
@@ -854,17 +887,195 @@ func _build_tidal_water() -> void:
 	_water_mesh = ArrayMesh.new()
 	_water_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,arrays)
 
-func _build_theme(theme: int, layout: int) -> ArrayMesh:
+func _build_theme(theme: int, layout: int, boss_terrain: bool = false) -> ArrayMesh:
+	# Encounter machinery sits on the same continuous roadsides as the
+	# district. Tall motifs yield the space within its reserved road tiles.
 	_clear_geometry()
 	match theme:
-		2: _ink_pass(layout)
-		3: _night_pursuit(layout)
-		4: _tidal_front(layout)
-		5: _orbital_berth(layout)
-	_district_craft(theme,layout)
+		2: _ink_pass(layout,boss_terrain)
+		3: _night_pursuit(layout,boss_terrain)
+		4: _tidal_front(layout,boss_terrain)
+		5: _orbital_berth(layout,boss_terrain)
+	_district_craft(theme,layout,boss_terrain)
+	if not boss_terrain: _district_spectacle(theme,layout)
 	return _commit_geometry()
 
-func _district_craft(theme: int, layout: int) -> void:
+func _district_spectacle(theme: int, layout: int) -> void:
+	# The silhouettes move with their tiles. The road and low approach
+	# airspace stay open for the encounter and its moving stage hardware.
+	match theme:
+		2: _ink_gorge_monastery(layout)
+		3: _cyber_hoist_hall(layout)
+		4: _tidal_lock_works(layout)
+		5: _orbital_ship_cradle(layout)
+
+
+func _ink_gorge_monastery(layout: int) -> void:
+	var ink := Color("292929")
+	var stone := Color("969696")
+	var ash := Color("c3c3c3")
+	var red := Color("922d23")
+	if layout in [2,11,20]:
+		# Deep stone shoulders carry a high roof over the gorge road.
+		for side: float in [-1.0,1.0]:
+			var pier := Vector3(side*15.9,0,-5.0)
+			_box(Vector3(4.0,23.6,6.4),pier+Vector3(0,-11.8,0),ink.lightened(0.18))
+			_box(Vector3(3.0,15.3,3.4),pier+Vector3(0,7.6,0),stone.darkened(0.16))
+			for course in range(5):
+				var width := 3.6-float(course)*0.19
+				_box(Vector3(width,0.40,width+0.45),pier+Vector3(0,0.22+0.38*course,0),stone)
+				_box(Vector3(width+0.1,0.43,width+0.57),pier+Vector3(-side*0.2*course,13.9+0.42*course,0),ash)
+			_box(Vector3(1.28,8.3,0.15),pier+Vector3(0,8.1,1.74),ink)
+			_banner(pier+Vector3(-side*1.55,15.7,1.51),3.2,red,ash)
+			_beam(pier+Vector3(0,14.6,0),pier+Vector3(-side*4.3,16.2,0),0.75,ink,1.9)
+		_box(Vector3(35.3,1.08,2.75),Vector3(0,16.1,-5),stone)
+		_box(Vector3(36.0,0.32,3.08),Vector3(0,16.8,-5),red.darkened(0.21))
+		_roof(Vector3(0,17.25,-5),Vector2(19.7,2.15),2.2,ink,ash)
+	elif layout in [6,15,23]:
+		# The colonnade overhangs the visible drop. Stone buttresses and
+		# sloped braces connect it to a continuous cliff foundation.
+		var side := -1.0 if layout == 15 else 1.0
+		var at := Vector3(side*23.0,4.6,-5.0)
+		_stone_foundation(at+Vector3(side*4.8,-11.2,0),Vector3(13.8,33.0,9.8),stone.darkened(0.24),layout)
+		_box(Vector3(15.8,0.85,9.82),at+Vector3(side*1.8,0,0),ash)
+		_box(Vector3(17.2,0.47,9.9),at+Vector3(side*2.1,-0.6,0),ink.lightened(0.26))
+		for z: float in [-1.8,-8.2]:
+			_beam(Vector3(side*24.2,-7.6,z),Vector3(side*16.6,3.8,z),0.79,ink.lightened(0.18),1.50)
+			_box(Vector3(0.91,6.3,0.95),Vector3(side*17.8,7.9,z),red.darkened(0.22))
+			_banner(Vector3(side*17.6,10.9,z+0.58),3.5,red,ash)
+		_guard_rail(Vector3(side*15.5,5.03,-9.8),Vector3(side*15.5,5.03,-0.18),1.08,ink)
+		_roof(at+Vector3(side*2.0,6.75,0),Vector2(9.6,4.8),2.5,ink,ash)
+		_pavilion(at+Vector3(side*8.0,10.25,0),1.03,ink,stone,red)
+
+
+func _cyber_hoist_hall(layout: int) -> void:
+	var steel := Color("53616f")
+	var frame := Color("273746")
+	var inset := Color("17232e")
+	var amber := Color(0.98,0.63,0.24,0.58)
+	var cyan := Color(0.29,0.72,0.89,0.60)
+	if layout in [1,7,13,19]:
+		# High truss rails have open apertures above the folding roof.
+		for side: float in [-1.0,1.0]:
+			var foot := Vector3(side*20.0,0,-5)
+			_box(Vector3(5.0,16.4,6.2),foot+Vector3(0,-8.2,0),inset)
+			for z: float in [-2.4,2.4]:
+				var bottom := foot+Vector3(side*1.05,-0.2,z)
+				var cap := foot+Vector3(-side*1.05,23.2,z)
+				_beam(bottom,cap,1.55,frame,1.9)
+				_box(Vector3(2.6,0.32,2.8),bottom+Vector3(0,0.31,0),steel)
+				_beam(cap+Vector3(0,-5.9,0),cap+Vector3(-side*7.3,0,0),0.71,steel,0.90)
+				_box(Vector3(1.05,5.1,0.28),cap+Vector3(-side*0.77,-2.32,0.78),cyan)
+			_box(Vector3(3.36,0.95,6.73),foot+Vector3(-side*0.92,23.0,0),steel)
+		for z: float in [-7.40,-2.60]:
+			_box(Vector3(40.2,1.18,0.82),Vector3(0,23.0,z),frame)
+			_box(Vector3(40.2,0.73,0.68),Vector3(0,18.48,z),steel)
+			for bay in range(8):
+				var x := float(bay)*4.95-19.8
+				_beam(Vector3(x,18.83,z),Vector3(x+4.95,22.58,z),0.49,steel,0.66)
+				_box(Vector3(2.46,0.12,0.45),Vector3(x+2.45,18.04,z),amber)
+		for x: float in [-15.3,-10.2,0.0,10.2,15.3]:
+			_box(Vector3(0.57,0.66,5.1),Vector3(x,20.55,-5),frame)
+		_box(Vector3(36.0,0.40,0.52),Vector3(0,17.9,-5.0),inset)
+		_box(Vector3(31.5,0.076,0.26),Vector3(0,17.64,-4.96),cyan)
+	elif layout in [2,3,8,9,14,15,20,21]:
+		var side := -1.0 if layout < 12 else 1.0
+		var at := Vector3(side*22.6,7.0,-5)
+		_box(Vector3(8.5,0.65,10.0),at,frame)
+		_box(Vector3(7.2,0.82,9.98),at+Vector3(side*1.3,5.1,0),steel)
+		_guard_rail(at+Vector3(-side*4.18,0.34,-9.9),at+Vector3(-side*4.18,0.34,-0.10),0.91,steel)
+		for z: float in [-8.2,-3.1]:
+			var p := Vector3(side*18.5,6.45,z)
+			_beam(p,p+Vector3(side*5.75,-7.4,0),0.45,steel,0.63)
+			_box(Vector3(0.14,0.51,1.90),p+Vector3(-side*0.15,0.83,0),cyan)
+			_box(Vector3(0.16,0.45,2.15),p+Vector3(-side*0.19,5.29,0),amber)
+
+
+func _tidal_lock_works(layout: int) -> void:
+	if layout not in [3,4,5,6,15,16,17,18]: return
+	var side := -1.0 if layout < 12 else 1.0
+	var sill := Color("43585e")
+	var plate := Color("657e80")
+	var rust := Color("a76b4d")
+	var water := Color(0.15,0.55,0.57,0.92)
+	var spray := Color(0.63,0.84,0.80,0.89)
+	# A raised basin and stepped spillway sit outside the working gate.
+	_box(Vector3(14.2,14.0,10.03),Vector3(side*27.4,-1.9,-5),sill)
+	_box(Vector3(12.4,0.43,10.0),Vector3(side*28.2,5.34,-5),water)
+	_box(Vector3(1.21,0.74,10.03),Vector3(side*20.3,5.10,-5),plate)
+	_box(Vector3(0.51,0.36,10.03),Vector3(side*20.35,5.63,-5),rust)
+	for step in range(4):
+		var x := side*(20.1-float(step)*0.98)
+		var y := 4.67-float(step)*1.58
+		_box(Vector3(1.50,0.29,8.66),Vector3(x,y,-5),plate)
+		_box(Vector3(0.79,0.32,8.18),Vector3(x-side*0.18,y+0.25,-5),water)
+		_box(Vector3(0.09,0.11,7.95),Vector3(x-side*0.64,y+0.14,-5),spray)
+		if step < 3:
+			_box(Vector3(0.12,1.41,8.18),Vector3(x-side*0.66,y-0.63,-5),water.darkened(0.16))
+	for z: float in [-8.5,-1.5]:
+		var top := Vector3(side*20.12,4.9,z)
+		_beam(Vector3(side*18.0,-7.1,z),top,1.22,sill,1.56)
+		_box(Vector3(1.31,0.42,1.62),top+Vector3(0,0.25,0),rust)
+	if layout in [3,15]:
+		var lock := Vector3(side*23.4,5.74,-5)
+		# The lead face exposes a separate overflow chute to the road.
+		# Its lower lip meets the local waves while buttresses hold the basin.
+		var lip := Vector3(side*26.6,5.53,0.02)
+		var foot := lip+Vector3(0,-9.25,1.42)
+		_beam(lip,foot,6.2,sill.darkened(0.28),0.74)
+		_beam(lip+Vector3(0,0.05,0.36),foot+Vector3(0,0.02,0.39),4.86,water,0.13)
+		for edge: float in [-2.92,2.92]:
+			_beam(lip+Vector3(edge,0.17,0.45),foot+Vector3(edge,0,0.56),0.61,plate,0.75)
+		for streak in range(7):
+			var offset := Vector3(float(streak-3)*0.65,0,0.49)
+			var begin := lip+offset-Vector3(0,float(streak%3)*0.82,0)
+			var end := foot+offset+Vector3(0,float(streak%2)*1.14,0)
+			_beam(begin,end,0.13+float(streak%3)*0.11,spray.darkened(0.08*float(streak%3)),0.09)
+		_box(Vector3(5.12,0.13,0.41),lip+Vector3(0,0.045,0.20),spray)
+		_box(Vector3(5.78,0.19,1.08),foot+Vector3(0,0.08,0.40),spray)
+		for x: float in [-2.8,2.8]:
+			_box(Vector3(1.21,6.3,1.42),lock+Vector3(x,3.13,0),sill)
+			_box(Vector3(1.65,0.55,1.98),lock+Vector3(x,6.0,0),rust)
+		_box(Vector3(7.75,0.72,1.78),lock+Vector3(0,6.46,0),plate)
+		_box(Vector3(5.10,1.5,1.6),lock+Vector3(0,5.5,0),sill)
+		_box(Vector3(3.27,0.09,0.26),lock+Vector3(0,4.72,0.83),spray)
+		_tidal_beacon(lock+Vector3(side*2.73,6.86,0),2.18)
+
+
+func _orbital_ship_cradle(layout: int) -> void:
+	if layout in [2,10,18]:
+		for side: float in [-1.0,1.0]:
+			var foot := Vector3(side*21.6,-8.1,-5.0)
+			_box(Vector3(5.0,3.4,8.0),foot,ORBITAL_INSET)
+			_box(Vector3(3.2,1.08,7.9),foot+Vector3(0,1.72,0),ORBITAL_BRASS)
+			for z: float in [-8.4,-1.6]:
+				var top := Vector3(side*18.9,28.6,z)
+				_beam(Vector3(side*22.0,-7.6,z),top,1.35,ORBITAL_FRAME,1.89)
+				_beam(Vector3(side*24.5,3.1,z),top+Vector3(side*1.8,-0.56,0),0.83,ORBITAL_STEEL,1.23)
+				_box(Vector3(2.7,1.1,2.75),top,ORBITAL_ARMOR)
+				_box(Vector3(0.58,0.27,1.68),top+Vector3(-side*1.15,0.52,0.9),ORBITAL_AMBER)
+			for section in range(8):
+				var a := 0.05+float(section)*0.142
+				_orbital_arc_panel(side,a,a+0.13,21.0,22.5,29.1,-8.0,-2.0,ORBITAL_ARMOR)
+				_orbital_arc_panel(side,a+0.014,a+0.104,21.13,21.42,29.1,-2.04,-1.81,ORBITAL_VIOLET)
+	elif layout in [3,4,5,6,11,12,13,14,19,20,21,22]:
+		var side := -1.0 if layout < 10 or layout >= 19 else 1.0
+		var at := Vector3(side*16.0,38.4,-5)
+		# Four contiguous slices form the hull's underside and ventral keel.
+		_box(Vector3(32.0,3.92,10.04),at+Vector3(side*1.75,2.40,0),ORBITAL_FRAME)
+		_box(Vector3(29.4,1.30,10.04),at+Vector3(side*0.35,-0.03,0),ORBITAL_ARMOR)
+		_box(Vector3(15.8,1.94,10.04),at+Vector3(-side*1.4,-1.62,0),ORBITAL_STEEL)
+		_box(Vector3(8.1,1.24,10.04),at+Vector3(-side*2.1,-2.94,0),ORBITAL_INSET)
+		_box(Vector3(1.06,0.12,10.03),at+Vector3(-side*5.63,-3.58,0),ORBITAL_VIOLET)
+		for z: float in [-8.8,-4.9,-1.0]:
+			_box(Vector3(19.3,0.57,0.31),at+Vector3(-side*0.31,-1.01,z),ORBITAL_ARMOR)
+			_box(Vector3(3.2,0.12,0.77),at+Vector3(-side*0.24,-3.60,z),ORBITAL_AMBER)
+		if layout%4 in [0,3]:
+			_beam(Vector3(side*25.3,8.3,-4.9),at+Vector3(side*5.9,-1.20,0.1),1.69,ORBITAL_FRAME,3.4)
+			_box(Vector3(3.11,21.6,3.3),Vector3(side*25.3,-2.22,-4.9),ORBITAL_INSET)
+
+
+func _district_craft(theme: int, layout: int, boss_terrain: bool) -> void:
 	if theme != 2: return
 	var stone := Color("939393")
 	for side: float in [-1.0,1.0]:
@@ -876,7 +1087,7 @@ func _district_craft(theme: int, layout: int) -> void:
 		for brick in range(12):
 			var z := -0.43-float(brick)*0.82
 			_box(Vector3(0.42,0.20,0.78),Vector3(side*5.5,0.0,z),stone.darkened(float(brick%3)*0.045))
-	if layout in [1,7,14,21]:
+	if not boss_terrain and layout in [1,7,14,21]:
 		var side := -1.0 if layout in [1,14] else 1.0
 		var at := Vector3(side*13.8,-0.5,-5)
 		_stone_foundation(at+Vector3(0,-10.25,0),Vector3(13,20.5,14),Color("777777"),layout)
@@ -950,7 +1161,7 @@ func _voxel_drum(at: Vector3, radius: float, height: float, body: Color, rim: Co
 		for y in [0.08,height-0.08]: _box(Vector3(width*2.0+0.05,0.13,unit),at+Vector3(0,y,z),rim)
 	_box(Vector3(radius*0.7,0.13,radius*0.7),at+Vector3(0,height+0.04,0),rim)
 
-func _ink_pass(layout: int) -> void:
+func _ink_pass(layout: int, boss_terrain: bool) -> void:
 	var ink := Color("242424")
 	var stone := Color("8c8c8c")
 	var pale := Color("c4c4c4")
@@ -969,6 +1180,7 @@ func _ink_pass(layout: int) -> void:
 			_box(Vector3(0.5,0.9,0.52),Vector3(side*5.50,0.25,z),stone)
 			_box(Vector3(0.68,0.14,0.67),Vector3(side*5.50,0.76,z),pale)
 			_box(Vector3(0.07,0.15,0.22),Vector3(side*5.22,0.32,z),red)
+	if boss_terrain: return
 	# Only one side is built up. The opposite side opens across the mountain
 	# valley, so the route does not become another identical column tunnel.
 	if layout in [1,7,14,21]:
@@ -1120,7 +1332,7 @@ func _pine(at: Vector3, side: float, ink: Color) -> void:
 		_beam(root,tip,0.12,ink)
 		_taper(tip-Vector3(0,0.05,0),0.38,Vector2(1.4,1.1),Vector2(0.4,0.3),ink,7)
 
-func _night_pursuit(layout: int) -> void:
+func _night_pursuit(layout: int, boss_terrain: bool) -> void:
 	var frame := Color("657382")
 	var steel := Color("3c4a59")
 	var hull := Color("25303d")
@@ -1132,16 +1344,18 @@ func _night_pursuit(layout: int) -> void:
 	for side: float in [-1.0,1.0]:
 		var band := posmod(layout+(0 if side < 0 else 5),12)
 		_pursuit_roadside(side,steel,hull,frame,lamp,glass)
-		_pursuit_service_yard(side,band,steel,hull,frame,lamp,glass,rail)
-		if band not in [4,9,11]:
-			_pursuit_service_gallery(side,band,steel,hull,dark,frame,lamp,glass,rail)
-		_pursuit_tower(side,layout,band,steel,hull,dark,glass)
+		if not boss_terrain:
+			_pursuit_service_yard(side,band,steel,hull,frame,lamp,glass,rail)
+			if band not in [4,9,11]:
+				_pursuit_service_gallery(side,band,steel,hull,dark,frame,lamp,glass,rail)
+			_pursuit_tower(side,layout,band,steel,hull,dark,glass)
 		_box(Vector3(6.4,0.25,10.02),Vector3(side*33.0,-14.99,-5),steel.darkened(0.35))
 		_box(Vector3(0.08,0.04,10),Vector3(side*33.0,-14.85,-5),rail)
 		for z: float in [-2.0,-8.0]:
 			_box(Vector3(0.14,4.7,0.15),Vector3(side*36.4,-12.59,z),frame)
 			_box(Vector3(1.0,0.12,0.15),Vector3(side*36.0,-10.30,z),steel)
 			_box(Vector3(0.53,0.07,0.14),Vector3(side*35.73,-10.39,z),lamp)
+	if boss_terrain: return
 	if layout in [1,8,15,22]: _pursuit_checkpoint(-5.0,layout%2==0,steel,frame,lamp)
 	if layout in [6,18]: _pursuit_overpass(layout,steel,hull,frame,lamp)
 
@@ -1309,7 +1523,7 @@ func _pursuit_checkpoint(z: float, left_first: bool, steel: Color, frame: Color,
 		_box(Vector3(1.1,0.28,0.62),Vector3(x,12.72,z),frame)
 		_box(Vector3(0.84,0.07,0.44),Vector3(x,12.55,z),amber)
 
-func _tidal_front(layout: int) -> void:
+func _tidal_front(layout: int, boss_terrain: bool) -> void:
 	var hull := Color(Color("303f4d"),0.994)
 	var plate := Color(Color("647889"),0.994)
 	var galvanised := Color(Color("9aa6a7"),0.994)
@@ -1344,13 +1558,14 @@ func _tidal_front(layout: int) -> void:
 			_box(Vector3(2.05,0.52,2.7),Vector3(side*6.31,-3.88,-5),rust)
 			_beam(Vector3(side*6.46,-4.6,-5),Vector3(side*5.5,-0.65,-0.45),0.47,plate,0.56)
 			_beam(Vector3(side*6.46,-4.6,-5),Vector3(side*5.5,-0.65,-9.55),0.47,plate,0.56)
-		if layout%2 == 0 and (layout%4 == 0) == (side < 0.0):
+		if not boss_terrain and layout%2 == 0 and (layout%4 == 0) == (side < 0.0):
 			var post := Vector3(side*6.03,0,-7.52)
 			_beveled_box(Vector3(0.51,0.45,0.62),post+Vector3(0,0.19,0),0.08,hull)
 			_box(Vector3(0.23,3.55,0.27),post+Vector3(0,1.96,0),plate)
 			_beam(post+Vector3(0,3.7,0),post+Vector3(side*0.81,3.7,0),0.23,hull,0.32)
 			_box(Vector3(0.58,0.19,0.45),post+Vector3(side*0.85,3.66,0),hull)
 			_box(Vector3(0.43,0.07,0.32),post+Vector3(side*0.85,3.55,0),lamp)
+	if boss_terrain: return
 	if layout in [3,17]:
 		var side := -1.0 if layout == 3 else 1.0
 		var at := Vector3(side*15.5,0,-5)
@@ -1476,7 +1691,7 @@ func _tidal_radar_pier(at: Vector3, hull: Color, plate: Color, teal: Color, rust
 	for bay in [-0.81,0.0,0.81]: _box(Vector3(0.09,0.65,0.11),at+Vector3(bay,2.1,1.27),hull)
 	_tidal_beacon(at+Vector3(1.31,3.04,-1.93),3.14)
 
-func _orbital_berth(layout: int) -> void:
+func _orbital_berth(layout: int, boss_terrain: bool) -> void:
 	# The runway, two continuous service walkways, and the lower station
 	# spine share overlapping cross-sections at every tile boundary.
 	_box(Vector3(13.0,1.85,10),Vector3(0,-1.08,-5),ORBITAL_FRAME)
@@ -1500,6 +1715,7 @@ func _orbital_berth(layout: int) -> void:
 			_box(Vector3(1.32,0.025,2.6),Vector3(side*6.64,-0.067,z),ORBITAL_FRAME)
 			for lug in range(4):
 				_box(Vector3(1.2,0.031,0.085),Vector3(side*6.64,-0.051,z-0.91+float(lug)*0.60),ORBITAL_STEEL)
+	if boss_terrain: return
 	if layout in [1,2,3,9,10,14,16,17,22]:
 		_orbital_hangar(-1.0 if layout in [1,2,9,14,16] else 1.0,layout)
 	if layout in [5,12,19]:
@@ -2246,21 +2462,30 @@ func _commit_geometry() -> ArrayMesh:
 
 func _triangle(a: Vector3,b: Vector3,c: Vector3,n: Vector3,color: Color) -> void:
 	# Godot's front faces use clockwise vertex order.
-	for point in [a,c,b]:
+	var linear_color := color.srgb_to_linear()
+	for point: Vector3 in [a,c,b]:
 		_vertices.append(point)
 		_normals.append(n)
-		_colors.append(color.srgb_to_linear())
+		_colors.append(linear_color)
 
 func _face(a: Vector3,b: Vector3,c: Vector3,d: Vector3,n: Vector3,color: Color) -> void:
-	_triangle(a,b,c,n,color)
-	_triangle(a,c,d,n,color)
+	var linear_color := color.srgb_to_linear()
+	for point: Vector3 in [a,c,b,a,d,c]:
+		_vertices.append(point)
+		_normals.append(n)
+		_colors.append(linear_color)
 
 func _box(size: Vector3,at: Vector3,color: Color,rotation: Vector3 = Vector3.ZERO) -> void:
-	var b := Basis.from_euler(rotation)
-	var p: Array[Vector3] = []
-	for v in [Vector3(-1,-1,-1),Vector3(1,-1,-1),Vector3(1,1,-1),Vector3(-1,1,-1),Vector3(-1,-1,1),Vector3(1,-1,1),Vector3(1,1,1),Vector3(-1,1,1)]: p.append(at+b*(v*size*0.5))
-	for face in [[0,3,2,1,Vector3.BACK*-1.0],[4,5,6,7,Vector3.BACK],[0,4,7,3,Vector3.LEFT],[1,2,6,5,Vector3.RIGHT],[3,7,6,2,Vector3.UP],[0,1,5,4,Vector3.DOWN]]:
-		_face(p[face[0]],p[face[1]],p[face[2]],p[face[3]],b*Vector3(face[4]),color)
+	var basis := Basis.from_euler(rotation)
+	var corners: Array[Vector3] = []
+	for corner in BOX_CORNERS:
+		corners.append(at+basis*(corner*size*0.5))
+	_face(corners[0],corners[3],corners[2],corners[1],basis*(Vector3.BACK*-1.0),color)
+	_face(corners[4],corners[5],corners[6],corners[7],basis*Vector3.BACK,color)
+	_face(corners[0],corners[4],corners[7],corners[3],basis*Vector3.LEFT,color)
+	_face(corners[1],corners[2],corners[6],corners[5],basis*Vector3.RIGHT,color)
+	_face(corners[3],corners[7],corners[6],corners[2],basis*Vector3.UP,color)
+	_face(corners[0],corners[1],corners[5],corners[4],basis*Vector3.DOWN,color)
 
 func _beam(a: Vector3,b: Vector3,width: float,color: Color,depth: float = -1.0) -> void:
 	var direction := b-a

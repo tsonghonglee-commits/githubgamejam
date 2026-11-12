@@ -117,8 +117,8 @@ func _run() -> void:
 	await capture("04-boss-cut")
 	button(false)
 	button(true, MOUSE_BUTTON_RIGHT)
-	button(false, MOUSE_BUTTON_RIGHT)
 	await create_timer(0.5).timeout
+	button(false, MOUSE_BUTTON_RIGHT)
 	observations["boss_attempt_kills"] = game.kills
 	observations["boss_attempt_health"] = game.health
 	observations["boss_attempt_speed"] = game.speed

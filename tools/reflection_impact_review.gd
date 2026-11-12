@@ -63,10 +63,13 @@ func _step() -> void:
 	clock += STEP
 	game.real_clock += STEP
 	game.game_clock += sim_dt
-	game.guard_cooldown = maxf(0.0,game.guard_cooldown-STEP)
-	if game.guard_remaining > 0.0:
-		game.guard_remaining = maxf(0.0,game.guard_remaining-sim_dt)
-		game.guard_age += sim_dt
+	if game.has_method("_update_guard"):
+		game._update_guard(STEP,sim_dt)
+	else:
+		game.guard_cooldown = maxf(0.0,game.guard_cooldown-STEP)
+		if game.guard_remaining > 0.0:
+			game.guard_remaining = maxf(0.0,game.guard_remaining-sim_dt)
+			game.guard_age += sim_dt
 	game.run_distance += game.speed*sim_dt
 	game._update_road(sim_dt)
 	game._update_blasts(sim_dt)
@@ -117,6 +120,14 @@ func _capture(stage: String) -> void:
 	var events: Array = []
 	for index in range(maxi(0,game.combat_events.size()-12),game.combat_events.size()): events.append(game.combat_events[index])
 	captures.append({"stage":stage,"path":path if rendered else "","clock":clock,"world_clock":game.game_clock,"impact_age":clock-impact_time if impact_time >= 0.0 else -1.0,"health":game.health,"kills":game.kills,"initial_material":initial_material,"remaining_material":source.get_remaining_voxel_count(),"remaining_body_material":source._voxels.size()-source._voxels.count(0),"dead":source.dead,"projectiles":shots,"blasts":blasts,"fragments":pieces,"recent_events":events})
+
+
+func _guard_button(pressed: bool) -> void:
+	var event := InputEventMouseButton.new()
+	event.button_index = MOUSE_BUTTON_RIGHT
+	event.pressed = pressed
+	Input.parse_input_event(event)
+	Input.flush_buffered_events()
 
 
 func _run() -> void:
@@ -175,18 +186,11 @@ func _run() -> void:
 				var time_to_plane: float = (-0.9-shot.node.global_position.z)/maxf(shot.velocity.z,0.001)
 				if time_to_plane <= 0.075 and not guard_sent:
 					await _capture("02-incoming-near")
-					var event := InputEventMouseButton.new()
-					event.button_index = MOUSE_BUTTON_RIGHT
-					event.pressed = true
-					Input.parse_input_event(event)
-					Input.flush_buffered_events()
+					_guard_button(true)
 					guard_sent = true
-					event = InputEventMouseButton.new()
-					event.button_index = MOUSE_BUTTON_RIGHT
-					event.pressed = false
-					Input.parse_input_event(event)
-					Input.flush_buffered_events()
+					if not game.has_method("_update_guard"): _guard_button(false)
 			elif not reflected_captured:
+				if game.has_method("_update_guard"): _guard_button(false)
 				reflected_velocity = shot.velocity
 				await _capture("03-parry-return")
 				reflected_captured = true

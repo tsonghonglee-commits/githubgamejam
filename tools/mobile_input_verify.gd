@@ -178,7 +178,7 @@ func _run() -> void:
 	var parry_flush_serial: int = game.cut_serial
 	send_drag(2, contacts[2] + Vector2(-1, 0))
 	send_touch(3, true, button_center("parry"))
-	expect(game.cut_serial > parry_flush_serial and game.guard_remaining > 0.0 and not game.slashing and game.pending_strokes.is_empty(), "separate parry finger flushes the last blade motion before interrupting slash")
+	expect(game.cut_serial > parry_flush_serial and game.guard_active and not game.slashing and game.pending_strokes.is_empty(), "separate parry finger flushes the last blade motion before interrupting slash")
 	send_touch(3, false, button_center("parry"))
 	send_drag(2, contacts[2] + Vector2(70, 0))
 	step(0.35)

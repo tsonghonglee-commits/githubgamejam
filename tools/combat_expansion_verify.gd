@@ -192,7 +192,7 @@ func _verify_interception_order_and_guard_reward() -> void:
 	game._spawn_projectile(Vector3(-0.05,1.65,-1.0),"bolt")
 	game._spawn_projectile(Vector3(0.05,1.65,-1.0),"missile")
 	game._update_projectiles(0.05)
-	expect(game.projectiles.is_empty() and _chain_explosions().size()==2 and game.health==5 and game.guard_chain_hits==1 and int(game.combat_stats.get("parries",0))==1 and int(game.combat_stats.get("projectiles_reflected",0))==1 and int(game.combat_stats.get("projectile_interceptions",0))==1 and int(game.combat_stats.get("projectile_chain_detonations",0))==1 and int(game.combat_stats.get("projectiles_cut",0))==0 and is_equal_approx(game.speed,47.0) and game.combo==1 and game.score==200*game.gear_for_speed(47.0),"a tightly clustered volley is consumed by one real parry plus interception, with exactly one perfect speed/combo/score reward and one explosion per shot")
+	expect(game.projectiles.is_empty() and _chain_explosions().size()==2 and game.health==5 and not game.guard_active and int(game.combat_stats.get("parries",0))==1 and int(game.combat_stats.get("projectiles_reflected",0))==1 and int(game.combat_stats.get("projectile_interceptions",0))==1 and int(game.combat_stats.get("projectile_chain_detonations",0))==1 and int(game.combat_stats.get("projectiles_cut",0))==0 and is_equal_approx(game.speed,60.0) and game.combo==1 and game.score==200*game.gear_for_speed(60.0),"a tightly clustered volley is consumed by one real parry plus interception, with exactly one perfect speed/combo/score reward and one explosion per shot")
 	observations["interception_order"] = rows
 
 
@@ -265,11 +265,11 @@ func _verify_chain_and_crossing() -> void:
 	_reset()
 	game._begin_guard()
 	game.guard_age = 0.075
-	# Keep this a same-window multi-guard contract. The original0.1m cluster
-	# is now covered separately by returned-shot interception and chain blast.
-	game._spawn_projectile(Vector3(-1.2, 1.65, -4.9), "bolt")
+	# Both shots hit the body, but their paths are separated enough that the
+	# returned bolt cannot intercept the second.
+	game._spawn_projectile(Vector3(-0.37, 1.65, -4.9), "bolt")
 	game.projectiles.back().velocity = Vector3(0,0,32)
-	game._spawn_projectile(Vector3(1.2, 1.65, -4.9), "missile")
+	game._spawn_projectile(Vector3(0.37, 1.65, -4.9), "missile")
 	game.projectiles.back().velocity = Vector3(0,0,32)
 	var simultaneous_dt: float = (-0.9-float(game.projectiles[0].node.global_position.z))/32.0
 	var boundary: Dictionary = game._next_projectile_event(simultaneous_dt)
@@ -278,7 +278,7 @@ func _verify_chain_and_crossing() -> void:
 	var reflected := 0
 	for projectile in game.projectiles:
 		if bool(projectile.get("reflected", false)): reflected += 1
-	expect(reflected == 2 and int(game.combat_stats.get("parries", 0)) == 1 and game.guard_chain_hits == 2 and is_equal_approx(game.speed,47.0) and game.combo==1 and game.score==200*game.gear_for_speed(47.0), "one parry window resolves both separated frame-end contacts and pays exactly one perfect speed/combo/score reward")
+	expect(reflected == 1 and game.health == 4 and not game.guard_active and int(game.combat_stats.get("parries", 0)) == 1 and is_equal_approx(game.speed,60.0) and game.combo==0 and game.score==200*game.gear_for_speed(60.0), "one guard resolves the first separated frame-end contact and pays exactly one perfect speed/score reward")
 	_reset()
 	var shot: Node3D = game._spawn_projectile(Vector3(0.0, 1.65, -20.0), "missile")
 	game.projectiles[0].velocity = Vector3(0, 0, 120)

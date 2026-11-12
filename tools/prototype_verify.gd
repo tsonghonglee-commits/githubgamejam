@@ -311,7 +311,6 @@ func verify_weapon_motion_contracts() -> void:
 	var returned: Transform3D = game.sword._drawn.transform
 	expect(game.sword._drawn.visible and not game.sword._handle.visible and debug.phase == "docked" and returned.origin.distance_to(dock.origin) < 0.01 and returned.basis.get_rotation_quaternion().angle_to(dock.basis.get_rotation_quaternion()) < 0.01, "the same physical katana reaches its docked transform only after the sheath insertion completes")
 	pointer_button(true, MOUSE_BUTTON_RIGHT)
-	pointer_button(false, MOUSE_BUTTON_RIGHT)
 	for sample in range(4):
 		game._process(1.0 / 60.0)
 		game.sword._process(1.0 / 60.0)
@@ -332,6 +331,7 @@ func verify_weapon_motion_contracts() -> void:
 		game.sword._process(1.0 / 60.0)
 	debug = game.sword.get_animation_debug_state()
 	expect(debug.phase == "parry_rebound", "parry compression progresses into a separate unloading rebound")
+	pointer_button(false, MOUSE_BUTTON_RIGHT)
 	clear_targets()
 	game.start_game()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -737,15 +737,14 @@ func _run() -> void:
 	expect(game._try_guard(), "active parry blocks an incoming attack")
 	var perfect_gain: float = game.speed - 12.0
 	var guard_speed: float = game.speed
-	expect(game._try_guard() and game.speed == guard_speed, "same parry window blocks overlapping attacks without farming speed")
+	expect(not game._try_guard() and game.speed == guard_speed, "a successful guard consumes the stance and awards speed once")
 	game.guard_cooldown = 0.0
 	game._begin_guard()
 	game.guard_age = 0.27
 	game.speed = 12.0
 	game._try_guard()
-	expect(perfect_gain > game.speed - 12.0, "more precise parry grants more speed")
-	game.guard_remaining = 0.0
-	game.guard_rewarded = false
+	expect(is_equal_approx(perfect_gain,34.0) and is_equal_approx(game.speed,12.0), "perfect parry grants 34 speed and ordinary guard grants none")
+	game.guard_active = false
 	game.hit_stop = 0.0
 	game.health = 5
 	var enemy = game._spawn_enemy("normal", 0, -4.4)
@@ -763,15 +762,14 @@ func _run() -> void:
 	enemy = game._spawn_enemy("normal", 3, -4.4)
 	game._update_enemies(0.0, 1.0)
 	game._update_enemies(0.85, 1.0)
-	game.guard_remaining = 0.25
+	game.guard_active = true
 	game.guard_age = 0.075
-	game.guard_rewarded = false
 	game._update_enemies(0.17, 1.0)
 	expect(str(enemy.get_meta("action_state")) == "stagger", "successful parry visibly interrupts enemy into recoil")
 	game._update_enemies(0.55, 1.0)
 	expect(game.health == 5 and enemy.resolved, "right-lane parry has no deferred duplicate damage")
 	clear_targets()
-	game.guard_remaining = 0.0
+	game.guard_active = false
 	game.health = 5
 	enemy = game._spawn_enemy("tank", 0, -4.4)
 	game._update_enemies(0.0, 1.0)
@@ -822,7 +820,7 @@ func _run() -> void:
 	var hand_result: Dictionary = cut_right_hand(enemy)
 	expect(int(hand_result.removed) > 0 and not enemy.dead and not enemy.has_attack_limb() and not enemy._weapons[0].visible, "real hand cut disarms surviving enemy and removes attached weapon")
 	game.health = 5
-	game.guard_remaining = 0.0
+	game.guard_active = false
 	game._start_melee(enemy)
 	game._update_enemies(0.85, 1.0)
 	game._update_enemies(0.17, 1.0)
@@ -953,7 +951,7 @@ func _run() -> void:
 	game.elapsed = 0.0
 	game.spawn_timer = 999.0
 	game.hit_stop = 0.0
-	game.guard_remaining = 0.0
+	game.guard_active = false
 	game.health = 1
 	game.victory_timer = 0.001
 	enemy = game._spawn_enemy("normal", 1, -2.2)
@@ -1033,7 +1031,7 @@ func _run() -> void:
 	game._input(release_motion)
 	game._process(0.5)
 	game._begin_guard()
-	expect(game.guard_remaining > 0.0 and not game.slashing, "parry cooldown uses actual time and remains responsive after slow mode")
+	expect(game.guard_active and not game.slashing, "guard remains responsive after slow mode")
 	prepare_grip_input()
 	var carrier = game._spawn_enemy("normal", 0, -9.0)
 	carrier.position.x = 100.0

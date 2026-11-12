@@ -1,6 +1,179 @@
 class_name VoxelEnemy
 extends Node3D
 
+class DepthColumnBatch extends RefCounted:
+	var part: int
+	var bounds: AABB
+	var columns: Array[PackedInt32Array] = []
+
+	func intersects_cut(camera: Camera3D, pose: Transform3D, cut_bounds: Rect2) -> bool:
+		if columns.size() < 8:
+			return true
+		var minimum := Vector2(INF, INF)
+		var maximum := Vector2(-INF, -INF)
+		# A projected box bounds all its points only while every corner is in
+		# front of the camera. Leave near-plane cases to the original cell test.
+		for corner in range(8):
+			var world_point := pose * bounds.get_endpoint(corner)
+			if camera.is_position_behind(world_point):
+				return true
+			var screen := camera.unproject_position(world_point)
+			if not screen.is_finite():
+				return true
+			minimum = minimum.min(screen)
+			maximum = maximum.max(screen)
+		return Rect2(minimum, maximum - minimum).grow(1.0).intersects(cut_bounds)
+
+class SeriesOcclusionWork extends RefCounted:
+	class Chunk extends RefCounted:
+		var begin := 0
+		var end := 0
+		var selected := PackedInt32Array()
+
+	var _voxels: PackedByteArray
+	var _part_ids: PackedByteArray
+	var _dimensions: Vector3i
+	var _cell: float
+	var low: Vector3
+	var budget: int
+	var parts: PackedInt32Array
+	var inverse_poses: Array[Transform3D]
+	var origins: PackedVector3Array
+	var bounds: Array[AABB]
+	var starts: Array[Vector3i]
+	var ends: Array[Vector3i]
+	var candidate_indices := PackedInt32Array()
+	var candidate_points := PackedVector3Array()
+	var column_offsets := PackedInt32Array()
+	var chunks: Array[Chunk] = []
+
+	func select() -> PackedInt32Array:
+		var columns := column_offsets.size() - 1
+		if candidate_indices.size() < 64 or columns < 8:
+			return _select_columns(0, columns)
+		var desired_chunks := mini(8, maxi(1, OS.get_processor_count() - 2))
+		# Keep each result in its own RefCounted job. Input arrays and the job
+		# list are only read until all workers and the caller have joined.
+		var columns_per_chunk := ceili(float(columns) / float(desired_chunks))
+		for begin in range(0, columns, columns_per_chunk):
+			var chunk := Chunk.new()
+			chunk.begin = begin
+			chunk.end = mini(begin + columns_per_chunk, columns)
+			chunks.append(chunk)
+		if chunks.size() < 2:
+			return _select_columns(0, columns)
+		var worker_count := chunks.size() - 1
+		var group := WorkerThreadPool.add_group_task(_resolve_chunk, worker_count, worker_count, true, "Series cut occlusion")
+		_resolve_chunk(worker_count)
+		WorkerThreadPool.wait_for_group_task_completion(group)
+		var selected := PackedInt32Array()
+		for chunk in chunks:
+			selected.append_array(chunk.selected)
+		return selected
+
+	func _resolve_chunk(index: int) -> void:
+		var chunk := chunks[index]
+		chunk.selected = _select_columns(chunk.begin, chunk.end)
+
+	func _select_columns(begin: int, end: int) -> PackedInt32Array:
+		var selected := PackedInt32Array()
+		for column in range(begin, end):
+			var remaining := budget
+			for candidate in range(column_offsets[column], column_offsets[column + 1]):
+				var index := candidate_indices[candidate]
+				if _occluded(index, candidate_points[candidate]):
+					continue
+				selected.append(index)
+				remaining -= 1
+				if remaining <= 0:
+					break
+		return selected
+
+	func _segment_box_fraction(from: Vector3, to: Vector3, bounds: AABB) -> float:
+		var delta := to-from
+		var enter := 0.0
+		var leave := 1.0
+		for axis in range(3):
+			if absf(delta[axis]) < 0.000001:
+				if from[axis] < bounds.position[axis] or from[axis] > bounds.end[axis]:
+					return INF
+			else:
+				var a := (bounds.position[axis]-from[axis])/delta[axis]
+				var b := (bounds.end[axis]-from[axis])/delta[axis]
+				enter = maxf(enter,minf(a,b))
+				leave = minf(leave,maxf(a,b))
+				if enter > leave:
+					return INF
+		return enter
+
+	func _occluded(target_index: int, target: Vector3) -> bool:
+		var before := 0
+		var dx := _dimensions.x
+		var dy := _dimensions.y
+		var dz := _dimensions.z
+		var plane := dx*dy
+		for slot in range(parts.size()):
+			var from := origins[slot]
+			var to: Vector3 = inverse_poses[slot] * target
+			var entry := _segment_box_fraction(from, to, bounds[slot])
+			if entry == INF: continue
+			var part := parts[slot]
+			var direction := to-from
+			var t := maxf(entry,0.0)+0.0000001
+			var grid := Vector3i(((from+direction*t-low)/_cell).floor()).clamp(Vector3i.ZERO,_dimensions-Vector3i.ONE)
+			var step := Vector3i(signi(int(signf(direction.x))),signi(int(signf(direction.y))),signi(int(signf(direction.z))))
+			var first := starts[slot]
+			var end := ends[slot]
+			# A ray can start just outside the part grid due to floating point
+			# entry rounding. Only shorten the bound in its exit direction.
+			var x_min := first.x if step.x < 0 else 0
+			var y_min := first.y if step.y < 0 else 0
+			var z_min := first.z if step.z < 0 else 0
+			var x_end := end.x if step.x > 0 else dx
+			var y_end := end.y if step.y > 0 else dy
+			var z_end := end.z if step.z > 0 else dz
+			var next := Vector3(INF,INF,INF)
+			var delta := Vector3(INF,INF,INF)
+			for axis in range(3):
+				var axis_direction := direction[axis]
+				var magnitude := absf(axis_direction)
+				if magnitude < 0.00000001: continue
+				var boundary: float = low[axis]+float(grid[axis]+(1 if step[axis] > 0 else 0))*_cell
+				next[axis] = (boundary-from[axis])/axis_direction
+				delta[axis] = _cell/magnitude
+			var x := grid.x
+			var y := grid.y
+			var z := grid.z
+			var index := x + dx * (y + dy * z)
+			var stride_y := step.y*dx
+			var stride_z := step.z*plane
+			# Keep next/delta as float32 Vector3, exactly as production. Converting
+			# the accumulators to scalar doubles changes corner/tie ray semantics.
+			while x >= x_min and y >= y_min and z >= z_min and x < x_end and y < y_end and z < z_end and t < 0.9999999:
+				if _voxels[index] > 0 and int(_part_ids[index]) == part and index != target_index:
+					before += 1
+					if before >= budget: return true
+				var next_x := next.x
+				var next_y := next.y
+				var next_z := next.z
+				t = minf(next_x,minf(next_y,next_z))
+				if t > 0.9999999: break
+				var tie_limit := t + 0.00000001
+				if next_x <= tie_limit:
+					x += step.x
+					index += step.x
+					next.x = next_x + delta.x
+				if next_y <= tie_limit:
+					y += step.y
+					index += stride_y
+					next.y = next_y + delta.y
+				if next_z <= tie_limit:
+					z += step.z
+					index += stride_z
+					next.z = next_z + delta.z
+		return false
+
+
 signal severed(enemy: Node3D, world_point: Vector3, removed_count: int)
 signal damaged(enemy: Node3D, world_point: Vector3, removed_count: int)
 
@@ -101,10 +274,13 @@ var _previous_weapon_valid := false
 var _strike_from_side := 1.0
 var _expansion_glows: Array[MeshInstance3D] = []
 var _depth_columns: Dictionary = {}
+var _depth_column_batches: Array[DepthColumnBatch] = []
 var _walk_distance := 0.0
 var _walk_last_age := 0.0
 var _walk_weight := 1.0
 var _hand_cache: Dictionary = {}
+var _hand_candidates: Array[PackedInt32Array] = []
+var _single_connected_body := false
 var _emitter_cache: Dictionary = {}
 var _ranged_hold_initialized := false
 var _ranged_seen_front_target := false
@@ -164,6 +340,7 @@ func configure(kind: String, lane: int = 0, variant: int = -1) -> void:
 	_restore_entry_visibility()
 	_hand_cache.clear()
 	_emitter_cache.clear()
+	_single_connected_body = false
 	_entry_material_remainder = 0
 	_ranged_hold_initialized = false
 	_ranged_seen_front_target = false
@@ -221,7 +398,9 @@ func configure(kind: String, lane: int = 0, variant: int = -1) -> void:
 		_part_ids = template.parts
 		_cell_points = template.points
 		_fine_neighbors = template.neighbors
+		_hand_candidates = template.hands
 		_depth_columns = template.get("columns",{})
+		_depth_column_batches = template.column_batches
 		_core_point = template.core
 		_initial_meshes = template.meshes.duplicate()
 		_initial_mesh_cell_counts = template.mesh_cell_counts
@@ -243,6 +422,7 @@ func configure(kind: String, lane: int = 0, variant: int = -1) -> void:
 		for part in _part_meshes:
 			meshes.append(part.mesh)
 		_body_templates[template_key] = _make_template(meshes)
+	_single_connected_body = bool(_body_templates[template_key].get("single_body",false))
 	_build_reactor_marker()
 	_configured = true
 	if SeriesScript.supports(kind): _series_integrity = _body_templates[template_key].series_integrity.duplicate(true)
@@ -335,6 +515,29 @@ func _build_voxel_data() -> void:
 				_depth_columns[key].append(index)
 	if _uses_fine_grid():
 		_cache_fine_neighbors()
+	_index_hand_candidates()
+	_build_depth_column_batches()
+
+
+func _build_depth_column_batches() -> void:
+	# Consecutive runs preserve authored column order and share one pose.
+	# Bounds cover authored cells, including any surviving subset after cuts.
+	_depth_column_batches = []
+	var batch: DepthColumnBatch
+	for column: PackedInt32Array in _depth_columns.values():
+		var part: int = _part_ids[column[0]]
+		var first := _cell_points[column[0]]
+		var last := _cell_points[column[column.size() - 1]]
+		if batch == null or batch.part != part or batch.columns.size() == 32:
+			batch = DepthColumnBatch.new()
+			batch.part = part
+			batch.bounds = AABB(first, last - first)
+			_depth_column_batches.append(batch)
+		else:
+			batch.bounds = batch.bounds.expand(first).expand(last)
+		batch.columns.append(column)
+	for column_batch in _depth_column_batches:
+		column_batch.bounds = column_batch.bounds.grow(_cell * 0.5)
 
 
 func _uses_fine_grid() -> bool:
@@ -355,16 +558,20 @@ func _make_template(meshes: Array) -> Dictionary:
 	var counts := PackedInt32Array()
 	counts.resize(PART_COUNT)
 	for index in _live_indices: counts[_part_ids[index]] += 1
-	var result := {"voxels":_voxels.duplicate(), "tags":_tags, "live":_live_indices.duplicate(), "parts":_part_ids, "points":_cell_points, "neighbors":_fine_neighbors, "columns":_depth_columns, "core":_core_point, "meshes":meshes, "mesh_cell_counts":counts}
+	var result := {"voxels":_voxels.duplicate(), "tags":_tags, "live":_live_indices.duplicate(), "parts":_part_ids, "points":_cell_points, "neighbors":_fine_neighbors, "hands":_hand_candidates, "columns":_depth_columns, "column_batches":_depth_column_batches, "core":_core_point, "meshes":meshes, "mesh_cell_counts":counts}
 	if _mesh_slice_ready:
 		result["slice_indices"] = _mesh_slice_indices
 		result["slice_arrays"] = _mesh_slice_arrays.duplicate()
 		_mesh_shared_slice_mask = FULL_MESH_MASK
 	if enemy_kind == "boss_carrier":
-		# This is the intact authored topology only. Every real material commit
-		# still recomputes its full groups and current load-bearing frame.
-		_refresh_carrier_hangers(_connected_components())
+		# Cache the intact authored frame. Cuts that can alter its connectivity
+		# or tags recompute the actual load-bearing groups.
+		var groups := _connected_components()
+		_refresh_carrier_hangers(groups)
+		result["single_body"] = groups.size() == 1
 		result["carrier_hangers"] = _carrier_hangers_connected.duplicate()
+	elif enemy_kind in ["tank","boss"]:
+		result["single_body"] = _connected_components().size() == 1
 	if SeriesScript.supports(enemy_kind):
 		_refresh_series_integrity(_connected_components())
 		result["series_integrity"] = _series_integrity.duplicate(true)
@@ -474,6 +681,7 @@ func _refresh_series_integrity(groups: Array[Dictionary]) -> void:
 	loaded.fill(false)
 	for i in range(supports.size()):
 		if supports[i].has("load_bounds"): remote_parts[int(supports[i].part)] = i
+	var pending_remote := remote_parts.size()
 	for group: Dictionary in groups:
 		if not (int(group.flags)&CORE_TAG and int(group.flags)&ANCHOR_TAG): continue
 		if series_boss:
@@ -484,12 +692,15 @@ func _refresh_series_integrity(groups: Array[Dictionary]) -> void:
 		# Visible neck labels are not health. For load-bearing vehicle necks,
 		# the remote real assembly must itself remain in the core's component.
 		# Removing a painted label while a genuine bypass survives cannot open armor.
-		if not remote_parts.is_empty():
+		if pending_remote > 0:
 			for index: int in group.indices:
 				var part := int(_part_ids[index])
 				if not remote_parts.has(part): continue
 				var support: int = remote_parts[part]
-				if not loaded[support] and AABB(supports[support].load_bounds).has_point(_cell_points[index]): loaded[support] = true
+				if not loaded[support] and AABB(supports[support].load_bounds).has_point(_cell_points[index]):
+					loaded[support] = true
+					pending_remote -= 1
+					if pending_remote == 0: break
 	for i in range(supports.size()): active.append(loaded[i] if supports[i].has("load_bounds") else (flags&(8<<i)) != 0)
 	var count := active.count(true)
 	_series_integrity = {"vulnerable":not supports.is_empty() and count < supports.size(),"active_supports":count,"total_supports":supports.size(),"name":layout.get("name","真实结构"),"support_active":active,"relay_intact":active[0] if enemy_kind == "cyber_captain" and not active.is_empty() else true}
@@ -1283,25 +1494,9 @@ func _hand_intact(part: int) -> bool:
 func _scan_hand_intact(part: int) -> bool:
 	# Check the hand itself, not a surviving shoulder stub. Otherwise a wrist cut
 	# would leave a floating weapon and the attack could still inflict damage.
-	if enemy_kind == "normal":
-		for index in _live_indices:
-			if _voxels[index] != 0 and _part_for_index(index) == part:
-				var point: Vector3 = _cell_points[index]
-				if point.y >= 1.14 and point.y <= 1.39 and absf(point.x) > 0.49 and point.z > 0.10:
-					return true
-		return false
-	if enemy_kind in ["tank","boss","ranged"]:
-		for index in _live_indices:
-			if _voxels[index] == 0 or _part_ids[index] != part:
-				continue
-			var point: Vector3 = _cell_points[index]
-			if enemy_kind == "ranged" and part == 1:
-				if absf(point.x-0.37) <= 0.11 and absf(point.y-1.83) <= 0.10 and absf(point.z-0.44) <= 0.13: return true
-				continue
-			var low := 1.02 if enemy_kind == "tank" else (1.92 if enemy_kind == "boss" else 1.70)
-			var high := 1.38 if enemy_kind == "tank" else (2.38 if enemy_kind == "boss" else 1.98)
-			var reach := 1.12 if enemy_kind == "tank" else (2.25 if enemy_kind == "boss" else 0.40)
-			if point.y >= low and point.y <= high and absf(point.x) > reach and point.z > 0.04:
+	if not _hand_candidates.is_empty():
+		for index in _hand_candidates[part]:
+			if _voxels[index] != 0:
 				return true
 		return false
 	var y_start: int = 6 if enemy_kind == "boss" else 12
@@ -1313,6 +1508,28 @@ func _scan_hand_intact(part: int) -> bool:
 				if _voxels[index] != 0 and _part_for_index(index) == part:
 					return true
 	return false
+
+
+func _index_hand_candidates() -> void:
+	# Hand locations are fixed in authored coordinates. Share their index lists,
+	# then test only the actor's surviving cells after a cut invalidates its cache.
+	_hand_candidates = []
+	if enemy_kind not in ["normal","tank","boss","ranged"]:
+		return
+	for part in range(PART_COUNT):
+		_hand_candidates.append(PackedInt32Array())
+	var low := {"normal":1.14,"tank":1.02,"boss":1.92,"ranged":1.70}[enemy_kind] as float
+	var high := {"normal":1.39,"tank":1.38,"boss":2.38,"ranged":1.98}[enemy_kind] as float
+	var reach := {"normal":0.49,"tank":1.12,"boss":2.25,"ranged":0.40}[enemy_kind] as float
+	var forward := 0.10 if enemy_kind == "normal" else 0.04
+	for index in _live_indices:
+		var part: int = _part_ids[index]
+		var point: Vector3 = _cell_points[index]
+		if enemy_kind == "ranged" and part == 1:
+			if absf(point.x-0.37) <= 0.11 and absf(point.y-1.83) <= 0.10 and absf(point.z-0.44) <= 0.13:
+				_hand_candidates[part].append(index)
+		elif point.y >= low and point.y <= high and absf(point.x) > reach and point.z > forward:
+			_hand_candidates[part].append(index)
 
 
 func _hide_action_props() -> void:
@@ -1678,6 +1895,7 @@ func _cut_body(camera: Camera3D, points: PackedVector2Array, power: float, blade
 		if direction.length_squared() > stroke.length_squared():
 			stroke = direction
 	var cut_indices := PackedInt32Array()
+	var band_squared := band * band
 	var depth_budget: int = _dimensions.z
 	if enemy_kind == "shield_drone":
 		depth_budget = clampi(int(floor(power * 2.0)), 2, _dimensions.z)
@@ -1699,6 +1917,7 @@ func _cut_body(camera: Camera3D, points: PackedVector2Array, power: float, blade
 	# genuinely carve farther into the same material instead of subtracting HP.
 	# Heavy armor takes a shallow material bite, not most of a joint at once.
 	if _uses_fine_grid() and not armored:
+		var segment_bounds := _cut_segment_bounds(points, relevant_segments, band)
 		# The finer slasher grid is mostly air. Project occupied cells only, using
 		# the same three posed body parts as the mesh and retained fragments.
 		for index in _live_indices:
@@ -1708,9 +1927,12 @@ func _cut_body(camera: Camera3D, points: PackedVector2Array, power: float, blade
 			if camera.is_position_behind(world_point):
 				continue
 			var screen := camera.unproject_position(world_point)
-			var intersects_path: bool = not regions.is_empty() and DebrisScript.point_in_sweep(screen, regions, band * band)
-			for segment in relevant_segments:
-				if Geometry2D.get_closest_point_to_segment(screen, points[segment], points[segment+1]).distance_squared_to(screen) <= band*band:
+			var intersects_path: bool = not regions.is_empty() and DebrisScript.point_in_sweep(screen, regions, band_squared)
+			for segment_index in range(relevant_segments.size()):
+				if not segment_bounds[segment_index].has_point(screen):
+					continue
+				var segment := relevant_segments[segment_index]
+				if Geometry2D.get_closest_point_to_segment(screen, points[segment], points[segment+1]).distance_squared_to(screen) <= band_squared:
 					intersects_path = true
 					break
 			if intersects_path:
@@ -1936,7 +2158,11 @@ func _commit_material_cut(cut_indices: PackedInt32Array, stroke: Vector2, camera
 	# Keep the exact posed cut cells before removing material. The visual
 	# burst is chosen after connectivity decides whether this is a real sever.
 	var dirty_mesh_mask := 0
-	var cache_cut := _mesh_slice_ready and cut_indices.size() <= 1024
+	# A long shallow cut can remove a thousand cells from a large hull while
+	# touching only a few planes. Keep its incremental mesh instead of
+	# rebuilding every face of the hull. Broad removals still use the full path.
+	var slice_update_limit := maxi(1024, _live_indices.size() / 8)
+	var cache_cut := _mesh_slice_ready and cut_indices.size() <= slice_update_limit
 	var removed_set: Dictionary = {}
 	for index in cut_indices:
 		dirty_mesh_mask |= 1 << _part_ids[index]
@@ -1946,6 +2172,10 @@ func _commit_material_cut(cut_indices: PackedInt32Array, stroke: Vector2, camera
 		for index in cut_indices: _mark_removed_mesh_slices(index,removed_set)
 	else:
 		_mesh_full_dirty_mask |= dirty_mesh_mask
+	if _cut_boundary_stays_connected(cut_indices):
+		if is_instance_valid(camera):
+			DebrisScript.emit_cut_particles(self, camera, spark_sources, stroke, _cell, "body")
+		return _finish_material_cut(cut_indices.size(), center, dirty_mesh_mask, true, false, start_time)
 	var groups: Array[Dictionary] = _connected_components()
 	var core_survives := false
 	var core_connected_to_base := false
@@ -1991,6 +2221,7 @@ func _commit_material_cut(cut_indices: PackedInt32Array, stroke: Vector2, camera
 					primary = group_index
 	else:
 		dead = was_dead or not core_survives or not core_connected_to_base or not head_connected_to_base
+	_single_connected_body = not dead and groups.size() == 1 and enemy_kind in ["tank","boss","boss_carrier"]
 	if dead and not was_dead: _restore_entry_visibility()
 	if is_instance_valid(camera):
 		DebrisScript.emit_cut_particles(self, camera, spark_sources, stroke, _cell, "sever" if dead and not was_dead else "body")
@@ -2006,117 +2237,150 @@ func _commit_material_cut(cut_indices: PackedInt32Array, stroke: Vector2, camera
 				continue
 		var indices: PackedInt32Array = groups[group_index]["indices"]
 		if _spawn_fragment(indices, stroke, dead):
+			# A small detached edge only changes nearby planes. Use the same
+			# exact face invalidation as the cut that freed it.
+			var cache_detachment := cache_cut and removed_set.size() + indices.size() <= slice_update_limit
 			for index in indices:
 				dirty_mesh_mask |= 1 << _part_ids[index]
-				_mesh_full_dirty_mask |= 1 << _part_ids[index]
+				if cache_detachment:
+					removed_set[index] = true
+				else:
+					_mesh_full_dirty_mask |= 1 << _part_ids[index]
 				_voxels[index] = 0
+			if cache_detachment:
+				for index in indices:
+					_mark_removed_mesh_slices(index, removed_set)
+	return _finish_material_cut(cut_indices.size(), center, dirty_mesh_mask, core_survives, dead and not was_dead, start_time)
+
+
+func _finish_material_cut(removed: int, center: Vector3, dirty_mesh_mask: int, core_survives: bool, killed: bool, start_time: int) -> Dictionary:
 	_next_mesh_mask = dirty_mesh_mask
 	_rebuild_body()
 	if is_instance_valid(_reactor):
 		_reactor.visible = not dead and core_survives
 	if dead:
 		_hide_action_props()
-	last_removed_count = cut_indices.size()
+	last_removed_count = removed
 	cut_count += 1
 	last_cut_usec = Time.get_ticks_usec() - start_time
 	var point: Vector3 = to_global(center)
-	if dead and not was_dead:
-		severed.emit(self, point, cut_indices.size())
+	if killed:
+		severed.emit(self, point, removed)
 	else:
-		damaged.emit(self, point, cut_indices.size())
-	return {"removed": cut_indices.size(), "killed": dead and not was_dead}
+		damaged.emit(self, point, removed)
+	return {"removed": removed, "killed": killed}
 
 
-func _select_coarse_cut(camera: Camera3D, points: PackedVector2Array, relevant_segments: PackedInt32Array, regions: Array[Dictionary], band: float, depth_budget: int, armored: bool, part_poses: Array[Transform3D]) -> PackedInt32Array:
+func _select_coarse_cut(camera: Camera3D, points: PackedVector2Array, relevant_segments: PackedInt32Array, regions: Array[Dictionary], band: float, depth_budget: int, _armored: bool, part_poses: Array[Transform3D]) -> PackedInt32Array:
 	var cut_indices := PackedInt32Array()
+	var segment_bounds := _cut_segment_bounds(points, relevant_segments, band)
+	var band_squared := band * band
+	var camera_origin := camera.global_position
+	var occluding_parts := PackedInt32Array()
 	var inverse_poses: Array[Transform3D] = []
+	var local_origins := PackedVector3Array()
+	var occlusion_bounds: Array[AABB] = []
+	var occlusion_grid_starts: Array[Vector3i] = []
+	var occlusion_grid_ends: Array[Vector3i] = []
+	var grid_low := Vector3.ZERO
 	if SeriesScript.supports(enemy_kind):
-		for pose: Transform3D in part_poses: inverse_poses.append(pose.affine_inverse())
+		grid_low = _point(0, 0, 0) - Vector3.ONE * _cell * 0.5
+		var full_bounds := AABB(grid_low, Vector3(_dimensions) * _cell)
+		# A cut selects all candidates before changing occupancy or meshes.
+		# Each ray can share the same active parts, bounds and camera transforms.
+		for part in range(PART_COUNT):
+			if _mesh_cell_counts.size() == PART_COUNT and _mesh_cell_counts[part] == 0:
+				continue
+			var inverse := part_poses[part].affine_inverse()
+			var bounds := full_bounds
+			if _part_meshes.size() == PART_COUNT and _part_meshes[part].mesh != null:
+				bounds = _part_meshes[part].mesh.get_aabb()
+			occluding_parts.append(part)
+			inverse_poses.append(inverse)
+			local_origins.append(inverse * camera_origin)
+			occlusion_bounds.append(bounds)
+			# Include an extra grid cell on each edge for mesh rounding.
+			# The ray can stop at the first monotonic coordinate past this box.
+			var first_cell := Vector3i(((bounds.position - grid_low) / _cell).floor()) - Vector3i.ONE
+			var past_last_cell := Vector3i(((bounds.end - grid_low) / _cell).ceil()) + Vector3i.ONE
+			occlusion_grid_starts.append(first_cell.clamp(Vector3i.ZERO, _dimensions))
+			occlusion_grid_ends.append(past_last_cell.clamp(Vector3i.ZERO, _dimensions))
 	# Columns contain authored occupied cells only, ordered by their real Z.
 	# Removed cells are skipped, while the first *surviving* facing layer still
 	# blocks later layers when the narrow blade missed it. Fine grids need not
 	# walk their much larger empty bounding volume to preserve this rule.
-	for column: PackedInt32Array in _depth_columns.values():
-		var pose: Transform3D = part_poses[_part_ids[column[0]]]
-		var ascending := pose.basis.z.dot(camera.global_position-pose*_cell_points[column[column.size()/2]]) < 0.0
-		var removed_in_column := 0
-		for offset in range(column.size()):
-			var index: int = column[offset if ascending else column.size()-1-offset]
-			if _voxels[index] == 0:
-				continue
-			var world_point := pose*_cell_points[index]
-			if camera.is_position_behind(world_point):
-				continue
-			var screen := camera.unproject_position(world_point)
-			var intersects_path: bool = not regions.is_empty() and DebrisScript.point_in_sweep(screen,regions,band*band)
-			for segment in relevant_segments:
-				if Geometry2D.get_closest_point_to_segment(screen,points[segment],points[segment+1]).distance_squared_to(screen) <= band*band:
-					intersects_path = true
+	var work: SeriesOcclusionWork
+	if not occluding_parts.is_empty():
+		work = SeriesOcclusionWork.new()
+		work._voxels = _voxels
+		work._part_ids = _part_ids
+		work._dimensions = _dimensions
+		work._cell = _cell
+		work.low = grid_low
+		work.budget = depth_budget
+		work.parts = occluding_parts
+		work.inverse_poses = inverse_poses
+		work.origins = local_origins
+		work.bounds = occlusion_bounds
+		work.starts = occlusion_grid_starts
+		work.ends = occlusion_grid_ends
+	var cut_bounds := Rect2()
+	for bounds in segment_bounds:
+		cut_bounds = cut_bounds.merge(bounds) if cut_bounds.has_area() else bounds
+	for region in regions:
+		var bounds: Rect2 = region.bounds
+		cut_bounds = cut_bounds.merge(bounds) if cut_bounds.has_area() else bounds
+	for batch in _depth_column_batches:
+		var pose := part_poses[batch.part]
+		if not batch.intersects_cut(camera, pose, cut_bounds):
+			continue
+		for column in batch.columns:
+			var ascending := pose.basis.z.dot(camera_origin-pose*_cell_points[column[column.size()/2]]) < 0.0
+			var removed_in_column := 0
+			var column_begin := work.candidate_indices.size() if work != null else 0
+			for offset in range(column.size()):
+				var index: int = column[offset if ascending else column.size()-1-offset]
+				if _voxels[index] == 0:
+					continue
+				var world_point := pose*_cell_points[index]
+				if camera.is_position_behind(world_point):
+					continue
+				var screen := camera.unproject_position(world_point)
+				var intersects_path: bool = not regions.is_empty() and DebrisScript.point_in_sweep(screen,regions,band_squared)
+				for segment_index in range(relevant_segments.size()):
+					if not segment_bounds[segment_index].has_point(screen):
+						continue
+					var segment := relevant_segments[segment_index]
+					if Geometry2D.get_closest_point_to_segment(screen,points[segment],points[segment+1]).distance_squared_to(screen) <= band_squared:
+						intersects_path = true
+						break
+				if not intersects_path:
 					break
-			if not intersects_path:
-				break
-			if removed_in_column >= depth_budget:
-				break
-			if not inverse_poses.is_empty() and _series_material_occluded(index,camera.global_position,world_point,inverse_poses,depth_budget): continue
-			removed_in_column += 1
-			cut_indices.append(index)
+				if work != null:
+					work.candidate_indices.append(index)
+					work.candidate_points.append(world_point)
+					continue
+				if removed_in_column >= depth_budget:
+					break
+				removed_in_column += 1
+				cut_indices.append(index)
+			if work != null and column_begin < work.candidate_indices.size():
+				work.column_offsets.append(column_begin)
+	if work != null:
+		work.column_offsets.append(work.candidate_indices.size())
+		return work.select()
 	return cut_indices
 
 
-func _series_material_occluded(target_index: int, origin: Vector3, target: Vector3, inverse_poses: Array[Transform3D], budget: int) -> bool:
-	var before := 0
-	var low := _point(0,0,0)-Vector3.ONE*_cell*0.5
-	var full_bounds := AABB(low,Vector3(_dimensions)*_cell)
-	var dx := _dimensions.x
-	var dy := _dimensions.y
-	var dz := _dimensions.z
-	var plane := dx*dy
-	for part in range(PART_COUNT):
-		if _mesh_cell_counts.size() == PART_COUNT and _mesh_cell_counts[part] == 0: continue
-		var bounds := full_bounds
-		if _part_meshes.size() == PART_COUNT and _part_meshes[part].mesh != null: bounds = _part_meshes[part].mesh.get_aabb()
-		var from: Vector3 = inverse_poses[part]*origin
-		var to: Vector3 = inverse_poses[part]*target
-		var entry := _segment_box_fraction(from,to,bounds)
-		if entry == INF: continue
-		var direction := to-from
-		var t := maxf(entry,0.0)+0.0000001
-		var grid := Vector3i(((from+direction*t-low)/_cell).floor()).clamp(Vector3i.ZERO,_dimensions-Vector3i.ONE)
-		var step := Vector3i(signi(int(signf(direction.x))),signi(int(signf(direction.y))),signi(int(signf(direction.z))))
-		var next := Vector3(INF,INF,INF)
-		var delta := Vector3(INF,INF,INF)
-		for axis in range(3):
-			if absf(direction[axis]) < 0.00000001: continue
-			var boundary: float = low[axis]+float(grid[axis]+(1 if step[axis] > 0 else 0))*_cell
-			next[axis] = (boundary-from[axis])/direction[axis]
-			delta[axis] = _cell/absf(direction[axis])
-		var x := grid.x
-		var y := grid.y
-		var z := grid.z
-		var index := _index(x,y,z)
-		var stride_y := step.y*dx
-		var stride_z := step.z*plane
-		# Keep next/delta as float32 Vector3, exactly as production. Converting
-		# the accumulators to scalar doubles changes corner/tie ray semantics.
-		while x >= 0 and y >= 0 and z >= 0 and x < dx and y < dy and z < dz and t < 0.9999999:
-			if index != target_index and _voxels[index] > 0 and int(_part_ids[index]) == part:
-				before += 1
-				if before >= budget: return true
-			t = minf(next.x,minf(next.y,next.z))
-			if t > 0.9999999: break
-			if next.x <= t+0.00000001:
-				x += step.x
-				index += step.x
-				next.x += delta.x
-			if next.y <= t+0.00000001:
-				y += step.y
-				index += stride_y
-				next.y += delta.y
-			if next.z <= t+0.00000001:
-				z += step.z
-				index += stride_z
-				next.z += delta.z
-	return false
+func _cut_segment_bounds(points: PackedVector2Array, segments: PackedInt32Array, band: float) -> Array[Rect2]:
+	var bounds: Array[Rect2] = []
+	for index in segments:
+		var start := points[index]
+		var end := points[index + 1]
+		# Rect2 excludes its right/bottom edge. Pad only this coarse rejection;
+		# the original closest-point test still accepts the exact cut radius.
+		bounds.append(Rect2(start.min(end), (end - start).abs()).grow(band + 0.001))
+	return bounds
 
 
 func _build_robot() -> void:
@@ -2933,8 +3197,16 @@ func _rebuild_body() -> void:
 				_mesh_slice_arrays[part_index] = _mesh_slice_arrays[part_index].duplicate()
 				_mesh_shared_slice_mask &= ~(1 << part_index)
 			var slices: Dictionary = _mesh_slice_arrays[part_index]
-			for key: Vector2i in _mesh_dirty_slices[part_index]:
-				var patch := _build_mesh_slice(part_index,key)
+			var batch := _mesh_slice_batch(part_index)
+			batch.keys = _mesh_dirty_slices[part_index].keys()
+			var threaded := indices.size() >= 4096 and batch.keys.size() >= 12 and OS.get_processor_count() >= 4
+			if threaded:
+				batch.results.resize(batch.keys.size())
+				var task := WorkerThreadPool.add_group_task(batch.process, batch.keys.size(), 4, true, "Build damaged voxel planes")
+				WorkerThreadPool.wait_for_group_task_completion(task)
+			for plane in range(batch.keys.size()):
+				var key: Vector2i = batch.keys[plane]
+				var patch: Dictionary = batch.results[plane] if threaded else batch.build(key)
 				if patch.is_empty(): slices.erase(key)
 				else: slices[key] = patch
 				_last_rebuilt_slices += 1
@@ -3017,66 +3289,110 @@ func _mark_removed_mesh_slices(index: int, removed: Dictionary) -> void:
 			dirty[Vector2i(side^1,coordinate[axis]+DIRECTIONS[side][axis])] = true
 
 
-func _build_mesh_slice(part: int, key: Vector2i) -> Dictionary:
-	var side := key.x
-	var axis: int = side/2
-	var u := 1 if axis==0 else 0
-	var v := 2 if axis<2 else 1
-	var row := _dimensions[u]
-	var layers: Dictionary = {}
-	var authored: PackedInt32Array = _mesh_slice_indices[part].get(Vector2i(axis,key.y),PackedInt32Array())
-	for index in authored:
-		if _voxels[index]==0: continue
-		var adjacent: int = _fine_neighbors[index*6+side]
-		if adjacent>=0 and _voxels[adjacent]!=0 and _part_ids[adjacent]==part: continue
-		var coordinate := _coords(index)
-		var material := int(_voxels[index])
-		if not layers.has(material): layers[material] = {}
-		layers[material][coordinate[u]+coordinate[v]*row] = true
-	var surface := SurfaceTool.new()
-	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var face_count := 0
-	var normal := Vector3(DIRECTIONS[side])
-	var tangent := Vector3.UP if axis==0 else Vector3.RIGHT
-	var bitangent := normal.cross(tangent)
-	var shade := 0.84+maxf(normal.y,0.0)*0.16
-	for material: int in layers:
-		var mask: Dictionary = layers[material]
-		var color: Color = _body_palette()[material]
-		var tint := Color(color.r*shade,color.g*shade,color.b*shade,1.0)
-		surface.set_normal(normal)
-		surface.set_color(tint)
-		for seed: int in mask.keys():
-			if not mask.has(seed): continue
-			var x: int = seed%row
-			var y: int = seed/row
-			var width := 1
-			while x+width<row and mask.has(seed+width): width += 1
-			var height := 1
-			while y+height<_dimensions[v]:
-				var complete := true
-				for step in range(width):
-					if not mask.has(seed+height*row+step):
-						complete = false
-						break
-				if not complete: break
-				height += 1
-			for yy in range(height):
-				for xx in range(width): mask.erase(seed+xx+yy*row)
-			var coordinate := Vector3i.ZERO
-			coordinate[axis] = key.y
-			coordinate[u] = x
-			coordinate[v] = y
-			var center := _point(coordinate.x,coordinate.y,coordinate.z)+normal*_cell*0.5
-			center[u] += float(width-1)*_cell*0.5
-			center[v] += float(height-1)*_cell*0.5
-			var a := tangent*float(width)*_cell*0.5
-			var b := bitangent*float(height)*_cell*0.5
-			for vertex in [center+a+b,center+a-b,center-a-b,center+a+b,center-a-b,center-a+b]: surface.add_vertex(vertex)
-			face_count += 1
-	if face_count==0: return {}
-	var arrays := surface.commit_to_arrays()
-	return {"vertices":arrays[Mesh.ARRAY_VERTEX],"normals":arrays[Mesh.ARRAY_NORMAL],"colors":arrays[Mesh.ARRAY_COLOR]}
+# A plane batch holds read-only material and topology during its synchronous job.
+# Workers write only their preallocated result slot. The main thread owns meshes.
+class MeshSliceBatch extends RefCounted:
+	var dimensions: Vector3i
+	var cell_size: float
+	var source_palette: Array[Color]
+	var voxels: PackedByteArray
+	var part_ids: PackedByteArray
+	var neighbors: PackedInt32Array
+	var source_planes: Dictionary
+	var part: int
+	var keys: Array
+	var results: Array[Dictionary] = []
+
+
+	func process(index: int) -> void:
+		results[index] = build(keys[index])
+
+
+	func build(key: Vector2i) -> Dictionary:
+		var side := key.x
+		var axis: int = side/2
+		var u := 1 if axis==0 else 0
+		var v := 2 if axis<2 else 1
+		var row := dimensions[u]
+		var layers: Dictionary = {}
+		var authored: PackedInt32Array = source_planes.get(Vector2i(axis,key.y),PackedInt32Array())
+		for index in authored:
+			if voxels[index]==0: continue
+			var adjacent: int = neighbors[index*6+side]
+			if adjacent>=0 and voxels[adjacent]!=0 and part_ids[adjacent]==part: continue
+			var coordinate := Vector3i(index%dimensions.x,(index/dimensions.x)%dimensions.y,index/(dimensions.x*dimensions.y))
+			var material := int(voxels[index])
+			if not layers.has(material): layers[material] = {}
+			layers[material][coordinate[u]+coordinate[v]*row] = true
+		if layers.is_empty(): return {}
+		var vertices := PackedVector3Array()
+		var colors := PackedColorArray()
+		var color_run := PackedColorArray()
+		var normal := Vector3(DIRECTIONS[side])
+		var tangent := Vector3.UP if axis==0 else Vector3.RIGHT
+		var bitangent := normal.cross(tangent)
+		var shade := 0.84+maxf(normal.y,0.0)*0.16
+		var palette := source_palette
+		for material: int in layers:
+			var mask: Dictionary = layers[material]
+			var color: Color = palette[material]
+			var tint := Color(color.r*shade,color.g*shade,color.b*shade,1.0)
+			var layer_start := vertices.size()
+			for seed: int in mask.keys():
+				if not mask.has(seed): continue
+				var x: int = seed%row
+				var y: int = seed/row
+				var width := 1
+				while x+width<row and mask.has(seed+width): width += 1
+				var height := 1
+				while y+height<dimensions[v]:
+					var complete := true
+					for step in range(width):
+						if not mask.has(seed+height*row+step):
+							complete = false
+							break
+					if not complete: break
+					height += 1
+				for yy in range(height):
+					for xx in range(width): mask.erase(seed+xx+yy*row)
+				var coordinate := Vector3i.ZERO
+				coordinate[axis] = key.y
+				coordinate[u] = x
+				coordinate[v] = y
+				var center := Vector3((float(coordinate.x)-float(dimensions.x-1)*0.5)*cell_size,(float(coordinate.y)+0.5)*cell_size,(float(coordinate.z)-float(dimensions.z-1)*0.5)*cell_size)+normal*cell_size*0.5
+				center[u] += float(width-1)*cell_size*0.5
+				center[v] += float(height-1)*cell_size*0.5
+				var a := tangent*float(width)*cell_size*0.5
+				var b := bitangent*float(height)*cell_size*0.5
+				var top_right := center+a+b
+				var bottom_left := center-a-b
+				vertices.append(top_right)
+				vertices.append(center+a-b)
+				vertices.append(bottom_left)
+				vertices.append(top_right)
+				vertices.append(bottom_left)
+				vertices.append(center-a+b)
+			color_run.resize(vertices.size()-layer_start)
+			color_run.fill(tint)
+			colors.append_array(color_run)
+		var normals := PackedVector3Array()
+		normals.resize(vertices.size())
+		normals.fill(normal)
+		return {"vertices":vertices,"normals":normals,"colors":colors}
+
+
+
+func _mesh_slice_batch(part: int) -> MeshSliceBatch:
+	var batch := MeshSliceBatch.new()
+	batch.dimensions = _dimensions
+	batch.cell_size = _cell
+	batch.source_palette = _body_palette()
+	batch.voxels = _voxels
+	batch.part_ids = _part_ids
+	batch.neighbors = _fine_neighbors
+	batch.source_planes = _mesh_slice_indices[part]
+	batch.part = part
+	return batch
 
 
 func _assemble_mesh_slices(slices: Dictionary) -> ArrayMesh:
@@ -3257,18 +3573,22 @@ func _cache_fine_neighbors() -> void:
 
 
 func _fine_components() -> Array[Dictionary]:
-	var visited:=PackedByteArray()
-	visited.resize(_voxels.size())
+	# Clearing a private occupancy copy on enqueue combines the air and
+	# visited checks. The real materials and FIFO discovery order stay intact.
+	var remaining := _voxels.duplicate()
+	# The neighbour cache uses -1 outside the grid. Packed-array indexing
+	# maps it to this empty sentinel so each visit needs one occupancy check.
+	remaining.append(0)
 	var result:Array[Dictionary]=[]
 	for seed in _live_indices:
-		if _voxels[seed]==0 or visited[seed]!=0:
+		if remaining[seed] == 0:
 			continue
 		# The BFS queue is already the final visitation order; keep one
 		# packed list instead of appending every cell a second time.
 		var queue:=PackedInt32Array([seed])
 		var head:=0
 		var flags:=0
-		visited[seed]=1
+		remaining[seed] = 0
 		while head<queue.size():
 			var current:int=queue[head]
 			head+=1
@@ -3277,31 +3597,82 @@ func _fine_components() -> Array[Dictionary]:
 			# Keep side0..5 and FIFO discovery order while avoiding a per-cell
 			# six-step iterator. Mark on enqueue exactly as in the looped BFS.
 			var adjacent:int=_fine_neighbors[base]
-			if adjacent>=0 and _voxels[adjacent]!=0 and visited[adjacent]==0:
-				visited[adjacent]=1
+			if remaining[adjacent] != 0:
+				remaining[adjacent] = 0
 				queue.append(adjacent)
 			adjacent=_fine_neighbors[base+1]
-			if adjacent>=0 and _voxels[adjacent]!=0 and visited[adjacent]==0:
-				visited[adjacent]=1
+			if remaining[adjacent] != 0:
+				remaining[adjacent] = 0
 				queue.append(adjacent)
 			adjacent=_fine_neighbors[base+2]
-			if adjacent>=0 and _voxels[adjacent]!=0 and visited[adjacent]==0:
-				visited[adjacent]=1
+			if remaining[adjacent] != 0:
+				remaining[adjacent] = 0
 				queue.append(adjacent)
 			adjacent=_fine_neighbors[base+3]
-			if adjacent>=0 and _voxels[adjacent]!=0 and visited[adjacent]==0:
-				visited[adjacent]=1
+			if remaining[adjacent] != 0:
+				remaining[adjacent] = 0
 				queue.append(adjacent)
 			adjacent=_fine_neighbors[base+4]
-			if adjacent>=0 and _voxels[adjacent]!=0 and visited[adjacent]==0:
-				visited[adjacent]=1
+			if remaining[adjacent] != 0:
+				remaining[adjacent] = 0
 				queue.append(adjacent)
 			adjacent=_fine_neighbors[base+5]
-			if adjacent>=0 and _voxels[adjacent]!=0 and visited[adjacent]==0:
-				visited[adjacent]=1
+			if remaining[adjacent] != 0:
+				remaining[adjacent] = 0
 				queue.append(adjacent)
 		result.append({"indices":queue,"flags":flags})
 	return result
+
+
+func _cut_boundary_stays_connected(cut_indices: PackedInt32Array) -> bool:
+	# If a previously connected body splits, each new component must touch a
+	# removed cell. A bounded search may prove all those neighbours still
+	# connect. Any inconclusive search falls back to full connectivity.
+	if not _single_connected_body or dead or cut_indices.size() > 384:
+		return false
+	var low := _dimensions
+	var high := Vector3i.ZERO
+	for index in cut_indices:
+		if _tags[index] != 0:
+			return false
+		var coordinate := _coords(index)
+		low = low.min(coordinate)
+		high = high.max(coordinate)
+	var padding := Vector3i(3,3,3)
+	low -= padding
+	high += padding
+	var marks := PackedByteArray()
+	marks.resize(_voxels.size())
+	var seed := -1
+	var boundary_count := 0
+	for index in cut_indices:
+		for side in range(6):
+			var adjacent: int = _fine_neighbors[index*6+side]
+			if adjacent >= 0 and _voxels[adjacent] != 0 and marks[adjacent] == 0:
+				marks[adjacent] = 1
+				seed = adjacent
+				boundary_count += 1
+	if seed < 0:
+		return false
+	var queue := PackedInt32Array([seed])
+	marks[seed] = 2
+	boundary_count -= 1
+	var head := 0
+	while boundary_count > 0 and head < queue.size() and head < 3072:
+		var current := queue[head]
+		head += 1
+		for side in range(6):
+			var adjacent: int = _fine_neighbors[current*6+side]
+			if adjacent < 0 or _voxels[adjacent] == 0 or marks[adjacent] == 2:
+				continue
+			var coordinate := _coords(adjacent)
+			if coordinate.x < low.x or coordinate.y < low.y or coordinate.z < low.z or coordinate.x > high.x or coordinate.y > high.y or coordinate.z > high.z:
+				continue
+			if marks[adjacent] == 1:
+				boundary_count -= 1
+			marks[adjacent] = 2
+			queue.append(adjacent)
+	return boundary_count == 0
 
 
 func _build_fine_mesh(indices: PackedInt32Array, origin: Vector3, membership: Dictionary) -> ArrayMesh:
@@ -3310,24 +3681,33 @@ func _build_fine_mesh(indices: PackedInt32Array, origin: Vector3, membership: Di
 	var surface:=SurfaceTool.new()
 	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var face_count:=0
+	var palette := _body_palette()
+	var palette_size := palette.size()
 	for side in range(6):
 		var axis:int=side/2
 		var u:int=1 if axis==0 else 0
 		var v:int=2 if axis<2 else 1
 		var row:int=_dimensions[u]
+		var normal:=Vector3(DIRECTIONS[side])
+		var tangent:=Vector3.UP if axis==0 else Vector3.RIGHT
+		var bitangent:=normal.cross(tangent)
+		var shade:float=0.84+maxf(normal.y,0.0)*0.16
 		var layers:Dictionary={}
 		for index in indices:
 			var adjacent:int=_fine_neighbors[index*6+side]
 			if adjacent>=0 and _voxels[adjacent]!=0 and (membership.is_empty() or membership.has(adjacent)):
 				continue
 			var p:=_coords(index)
-			var key:int=p[axis]*_body_palette().size()+int(_voxels[index])
+			var key:int=p[axis]*palette_size+int(_voxels[index])
 			if not layers.has(key): layers[key]={}
 			layers[key][p[u]+p[v]*row]=true
+		surface.set_normal(normal)
 		for code:int in layers:
 			var mask:Dictionary=layers[code]
-			var layer:int=code/_body_palette().size()
-			var color:Color=_body_palette()[code%_body_palette().size()]
+			var layer:int=code/palette_size
+			var color:Color=palette[code%palette_size]
+			var tint:=Color(color.r*shade,color.g*shade,color.b*shade,1.0)
+			surface.set_color(tint)
 			for key:int in mask.keys():
 				if not mask.has(key): continue
 				var x:int=key%row
@@ -3349,20 +3729,19 @@ func _build_fine_mesh(indices: PackedInt32Array, origin: Vector3, membership: Di
 				p[axis]=layer
 				p[u]=x
 				p[v]=y
-				var normal:=Vector3(DIRECTIONS[side])
-				var tangent:=Vector3.UP if axis==0 else Vector3.RIGHT
-				var bitangent:=normal.cross(tangent)
 				var centre:=_point(p.x,p.y,p.z)-origin+normal*_cell*0.5
 				centre[u]+=float(width-1)*_cell*0.5
 				centre[v]+=float(height-1)*_cell*0.5
 				var a:=tangent*float(width)*_cell*0.5
 				var b:=bitangent*float(height)*_cell*0.5
-				var shade:float=0.84+maxf(normal.y,0.0)*0.16
-				var tint:=Color(color.r*shade,color.g*shade,color.b*shade,1.0)
-				for vertex in [centre+a+b,centre+a-b,centre-a-b,centre+a+b,centre-a-b,centre-a+b]:
-					surface.set_normal(normal)
-					surface.set_color(tint)
-					surface.add_vertex(vertex)
+				var upper_right := centre+a+b
+				var lower_left := centre-a-b
+				surface.add_vertex(upper_right)
+				surface.add_vertex(centre+a-b)
+				surface.add_vertex(lower_left)
+				surface.add_vertex(upper_right)
+				surface.add_vertex(lower_left)
+				surface.add_vertex(centre-a+b)
 				face_count+=1
 	if face_count==0: return null
 	return surface.commit()

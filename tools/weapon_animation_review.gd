@@ -140,7 +140,7 @@ func _process(_delta: float) -> bool:
 		_motion(Vector2(-12, -8))
 	if frame in [250, 363, 435]:
 		_button(true, MOUSE_BUTTON_RIGHT)
-	if frame in [251, 364, 436]:
+	if frame in [269, 376, 449]:
 		_button(false, MOUSE_BUTTON_RIGHT)
 	if frame == 330:
 		var enemy = game._spawn_enemy("normal", 1, -13.0)

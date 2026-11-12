@@ -105,6 +105,14 @@ const LIGHT_SLASHES: Array[Dictionary] = [
 ]
 
 var _scabbard: Node3D
+var _sheath_alert_level := 0.0
+var _sheath_alert_bands: Array[MeshInstance3D] = []
+var _sheath_ivory: StandardMaterial3D
+var _sheath_alert_material: StandardMaterial3D
+var _sheath_alert_halo: MeshInstance3D
+var _sheath_halo_material: StandardMaterial3D
+var _sheath_outer_halo: MeshInstance3D
+var _sheath_outer_halo_material: StandardMaterial3D
 var _handle: Node3D
 var _drawn: Node3D
 var _mode := "sheathed"
@@ -204,8 +212,7 @@ func _ready() -> void:
 		_box(_scabbard, Vector3(0.014, 0.008, 0.002), Vector3(0.018, -0.16 - index * 0.2, 0.023), copper)
 	# Small flush fittings carry the same painted steel / copper family as the
 	# factory armour. They stay on the sheath, clear of the moving blade.
-	_box(_scabbard, Vector3(0.033, 0.003, 0.002), Vector3(0, -0.084, 0.022), ivory)
-	_box(_scabbard, Vector3(0.033, 0.003, 0.002), Vector3(0, -0.097, 0.022), ivory)
+	_build_sheath_alert(ivory)
 	for at in [Vector3(-0.026, -0.025, 0.025), Vector3(0.026, -0.025, 0.025), Vector3(0.022, -0.884, 0.024)]:
 		_box(_scabbard, Vector3(0.004, 0.006, 0.002), at, dark)
 	_handle = Node3D.new()
@@ -265,6 +272,72 @@ func _ready() -> void:
 	_energy_arc.visible = false
 	add_child(_energy_arc)
 	_build_held_voxels()
+
+
+func _build_sheath_alert(ivory: StandardMaterial3D) -> void:
+	_sheath_ivory = ivory
+	_sheath_alert_material = ivory.duplicate() as StandardMaterial3D
+	_sheath_alert_material.emission_enabled = true
+	for height in [-0.084, -0.097]:
+		_sheath_alert_bands.append(_box(_scabbard, Vector3(0.033, 0.003, 0.002), Vector3(0, height, 0.022), ivory))
+
+	var gradient := Gradient.new()
+	gradient.offsets = PackedFloat32Array([0.0, 0.27, 0.65, 1.0])
+	gradient.colors = PackedColorArray([Color.WHITE, Color(1, 1, 1, 0.64), Color(1, 1, 1, 0.12), Color(1, 1, 1, 0)])
+	var halo_texture := GradientTexture2D.new()
+	halo_texture.gradient = gradient
+	halo_texture.fill = GradientTexture2D.FILL_RADIAL
+	halo_texture.fill_from = Vector2(0.5, 0.5)
+	halo_texture.fill_to = Vector2(1.0, 0.5)
+	_sheath_halo_material = _new_viewmodel_material()
+	_sheath_halo_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_sheath_halo_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_sheath_halo_material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	_sheath_halo_material.albedo_texture = halo_texture
+	var halo_mesh := QuadMesh.new()
+	halo_mesh.size = Vector2(0.105, 0.065)
+	_sheath_alert_halo = MeshInstance3D.new()
+	_sheath_alert_halo.name = "SheathAlertHalo"
+	_sheath_alert_halo.mesh = halo_mesh
+	_sheath_alert_halo.material_override = _sheath_halo_material
+	_sheath_alert_halo.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# Float the light just above the trim so its edge does not clip the halo.
+	_sheath_alert_halo.position = Vector3(0.0, -0.0905, 0.027)
+	_sheath_alert_halo.visible = false
+	_scabbard.add_child(_sheath_alert_halo)
+	_sheath_outer_halo_material = _sheath_halo_material.duplicate() as StandardMaterial3D
+	_sheath_outer_halo = MeshInstance3D.new()
+	_sheath_outer_halo.name = "SheathAlertOuterHalo"
+	_sheath_outer_halo.mesh = halo_mesh
+	_sheath_outer_halo.material_override = _sheath_outer_halo_material
+	_sheath_outer_halo.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_sheath_outer_halo.position = _sheath_alert_halo.position
+	_sheath_outer_halo.scale = Vector3(3.1, 3.9, 1.0)
+	_sheath_outer_halo.visible = false
+	_scabbard.add_child(_sheath_outer_halo)
+
+
+func set_sheath_alert(level: float) -> void:
+	var strength := clampf(level, 0.0, 2.0)
+	if _sheath_alert_halo == null or is_equal_approx(strength, _sheath_alert_level):
+		return
+	var active := strength > 0.0
+	if active != _sheath_alert_halo.visible:
+		_sheath_alert_halo.visible = active
+		for band in _sheath_alert_bands:
+			band.material_override = _sheath_alert_material if active else _sheath_ivory
+	_sheath_alert_level = strength
+	_sheath_outer_halo.visible = strength > 1.0
+	if not active:
+		return
+
+	var peak := smoothstep(1.0, 2.0, strength)
+	_sheath_alert_material.albedo_color = _sheath_ivory.albedo_color.lerp(Color(0.34, 0.023, 0.013), smoothstep(0.0, 0.4, strength))
+	_sheath_alert_material.emission = Color(1.0, 0.025, 0.009).lerp(Color(1.0, 0.44, 0.28), peak)
+	_sheath_alert_material.emission_energy_multiplier = 0.28 * strength + 2.4 * peak
+	_sheath_halo_material.albedo_color = Color(1.0, lerpf(0.055, 0.13, peak), 0.018, 0.10 * strength + 0.60 * peak)
+	_sheath_alert_halo.scale = Vector3.ONE * lerpf(0.86, 1.55, peak)
+	_sheath_outer_halo_material.albedo_color = Color(1.0, 0.025, 0.012, 0.72 * peak)
 
 
 func set_pose(mode: String, progress: float = 0.0, stroke: Vector2 = Vector2.ZERO) -> void:
@@ -563,7 +636,9 @@ func _process(delta: float) -> void:
 	var sway := sin(_elapsed * 5.5) * 0.004
 	# The off-hand sheath lowers clear of the cutting arc. It returns before
 	# the tip alignment, independently of the cursor-owned physical wrist.
-	var drop_target := 0.0 if _mode == "sheathed" else 1.0
+	# Keep the two warning lights within the lower edge of the view when drawn.
+	var alert_drop := lerpf(1.0, 0.42, smoothstep(0.0, 0.44, _sheath_alert_level))
+	var drop_target := 0.0 if _mode == "sheathed" else alert_drop
 	_scabbard_drop = lerpf(_scabbard_drop, drop_target, 1.0 - exp(-real_delta * 28.0))
 	_scabbard.position = Vector3(0.47 + sway + _scabbard_drop * 0.10, -0.26 + sway * 0.5 - _scabbard_drop * 0.36, -0.76)
 	var pose := _drawn.transform

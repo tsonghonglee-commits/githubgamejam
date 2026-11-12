@@ -70,7 +70,7 @@ func handle_event(event: InputEvent) -> bool:
 		return false
 	if event is InputEventScreenTouch:
 		if event.canceled or not event.pressed:
-			_release(event.index)
+			_release(event.index,not event.canceled)
 		else:
 			_press(event.index, event.position)
 		return true
@@ -88,7 +88,7 @@ func handle_event(event: InputEvent) -> bool:
 
 func _press(index: int, point: Vector2) -> void:
 	if touches.has(index):
-		_release(index)
+		_release(index,false)
 	if game.state != "playing":
 		touches[index] = "menu"
 		if game.state == "paused":
@@ -99,7 +99,7 @@ func _press(index: int, point: Vector2) -> void:
 			game.start_game()
 		return
 	var action := get_action_at(point)
-	if action in ["blade", "look"] and touches.values().has(action):
+	if action in ["blade", "look", "parry"] and touches.values().has(action):
 		action = "ignored"
 	touches[index] = action
 	match action:
@@ -110,13 +110,15 @@ func _press(index: int, point: Vector2) -> void:
 		"pause": game._pause_game()
 
 
-func _release(index: int) -> void:
+func _release(index: int, allow_tap: bool = true) -> void:
 	var action: String = str(touches.get(index, "ignored"))
 	touches.erase(index)
 	if action == "boost":
 		game.shift_down = touches.values().has("boost")
 	elif action == "blade":
 		game.mobile_end_blade()
+	elif action == "parry":
+		game._release_guard(allow_tap)
 
 
 func release_all() -> void:

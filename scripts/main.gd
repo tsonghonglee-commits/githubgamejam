@@ -35,8 +35,23 @@ const MAX_PROJECTILE_EVENTS := MAX_PROJECTILES*2
 const MAX_BLASTS := 12
 const ENEMY_RUN_SPEED := 2.8
 const PLAYER_CUT_MIN_Z := -32.0
+const PLAYER_CUT_MAX_Z := -0.5
 const GROUND_ENTRY_Z := PLAYER_CUT_MIN_Z-8.0
+const MELEE_STRIKE_SECONDS := 0.28
+const MELEE_CONTACT_PHASE := 0.55
+const BOSS_STRIKE_SECONDS := 0.46
+const BOSS_FIRE_PHASE := 0.55
+const BOSS_SHOCK_ORIGIN := Vector3(0, 1.75, -9.5)
+const GUARD_IDEAL_AGE := 0.075
+const GUARD_PRECISION_FALLOFF := 0.23
+const GUARD_PRECISE_THRESHOLD := 0.83
+const GUARD_TAP_WINDOW := GUARD_IDEAL_AGE+GUARD_PRECISION_FALLOFF*(1.0-GUARD_PRECISE_THRESHOLD)
+const GUARD_RECOVERY_SECONDS := 0.15
+const SHEATH_ALERT_LEAD := 0.60
+const SHEATH_ALERT_PEAK_LEAD := 0.40
+const SHEATH_BREATH_SECONDS := 1.35
 const PROJECTILE_SPEED_SCALE: float = 2.0 / 3.0
+const PROJECTILE_TARGET := Vector3(0, 1.65, -0.9)
 const PROJECTILE_EVENT_TIE_EPSILON: float = 0.000001
 const REFLECTED_BLAST_RADII := {"bolt":0.90,"shock":1.15,"missile":1.45,"mine":1.25,"sword_wave":1.1,"ink_spear":0.95,"seal":1.05,"buckshot":0.75,"needle":0.85,"beacon":0.9,"electric_wave":1.15,"torpedo":1.45,"plasma_lance":1.7,"cannon_orb":1.3}
 const FLYING_ENEMIES := ["drone","missile_drone","shield_drone","interceptor","mine_layer"]
@@ -83,11 +98,12 @@ var left_down: bool = false
 var left_time: float = 0.0
 var slashing: bool = false
 var slash_lock: bool = false
-var guard_remaining: float = 0.0
+var guard_active := false
 var guard_age: float = 0.0
 var guard_cooldown: float = 0.0
-var guard_rewarded: bool = false
-var guard_chain_hits: int = 0
+var _right_guard_down := false
+var _guard_queued := false
+var _guard_tap_released := false
 var hit_stop: float = 0.0
 var hurt_flash: float = 0.0
 var shake: float = 0.0
@@ -149,6 +165,7 @@ var blade_paths: Array = []
 var impact_strength: float = 0.0
 var kill_pulse: float = 0.0
 var parry_pulse: float = 0.0
+var _sheath_breath_age := 0.0
 var slash_energy: float = 0.0
 var impact_direction: Vector2 = Vector2(1.0, -0.6).normalized()
 var impact_point: Vector2 = Vector2.ZERO
@@ -215,7 +232,7 @@ func _ready() -> void:
 	_build_menu_showcase()
 	campaign.prepare_new_run(false)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	print("Slay the highway / 杀路 v0.11.7 four-stage campaign ready | Godot ", Engine.get_version_info().string)
+	print("Slay the highway / 杀路 v%s four-stage campaign ready | Godot " % ProjectSettings.get_setting("application/config/version"), Engine.get_version_info().string)
 	if "--preview" in OS.get_cmdline_user_args():
 		start_game()
 		_spawn_enemy("normal", 1, -10.0)
@@ -344,7 +361,6 @@ func _input(event: InputEvent) -> void:
 			if event.pressed:
 				if left_down:
 					return
-				guard_remaining = 0.0
 				left_down = true
 				left_time = 0.0
 				press_drag = Vector2.ZERO
@@ -358,12 +374,18 @@ func _input(event: InputEvent) -> void:
 				slashing = false
 				slash_lock = false
 				pending_strokes.clear()
-		if event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
-			_begin_guard()
+		if event.button_index == MOUSE_BUTTON_RIGHT:
+			if event.pressed and not _right_guard_down:
+				_right_guard_down = true
+				_begin_guard()
+			elif not event.pressed:
+				_right_guard_down = false
+				_release_guard()
 
 
 func mobile_begin_blade() -> void:
-	guard_remaining = 0.0
+	guard_active = false
+	_guard_queued = false
 	left_down = true
 	left_time = LONG_PRESS
 	slash_lock = false
@@ -425,6 +447,7 @@ func start_game() -> void:
 	_clear_blasts()
 	state = "playing"
 	sword.visible = true
+	_clear_sheath_alert()
 	combat_events.clear()
 	_volley_damage.clear()
 	combat_stats = {"parries": 0, "perfects": 0, "hits_taken": 0, "projectiles_cut": 0, "windups": 0, "impacts": 0, "kills": 0, "slash_time": 0.0}
@@ -453,10 +476,11 @@ func start_game() -> void:
 	slashing = false
 	slash_lock = false
 	shift_down = false
-	guard_remaining = 0.0
+	guard_active = false
+	_right_guard_down = false
+	_guard_queued = false
+	guard_age = 0.0
 	guard_cooldown = 0.0
-	guard_rewarded = false
-	guard_chain_hits = 0
 	victory_timer = -1.0
 	last_impact_feedback = -10.0
 	impact_strength = 0.0
@@ -623,9 +647,14 @@ func _reset_input() -> void:
 	shift_down = false
 	slashing = false
 	slash_view_locked = false
-	guard_remaining = 0.0
+	guard_active = false
+	_right_guard_down = false
+	_guard_queued = false
+	guard_age = 0.0
+	guard_cooldown = 0.0
 	pending_strokes.clear()
 	sword.set_pose("sheathed")
+	_clear_sheath_alert()
 
 
 func _start_game_from_ui(reset_mode: bool = true) -> void:
@@ -831,10 +860,7 @@ func _process(delta: float) -> void:
 		game_clock += sim_dt
 		if not training:
 			elapsed += sim_dt
-		guard_cooldown = maxf(0.0, guard_cooldown - delta)
-		if guard_remaining > 0.0:
-			guard_remaining = maxf(0.0, guard_remaining - sim_dt)
-			guard_age += sim_dt
+		_update_guard(delta, sim_dt)
 		_update_camera(delta)
 		_update_impact_effects(sim_dt, 0.0 if stopped else delta)
 		_update_blasts(sim_dt)
@@ -866,14 +892,16 @@ func _process(delta: float) -> void:
 					campaign.legacy_boss_finished()
 				else:
 					_finish(true)
-		if guard_remaining > 0.0:
-			sword.set_pose("parry", guard_age / 0.30)
+		if guard_active:
+			sword.set_pose("parry", minf(1.0,guard_age / 0.30))
 		elif slashing:
 			sword.set_pose("held", 0.0, slash_cursor / get_viewport().get_visible_rect().size - Vector2(0.5, 0.5))
-		elif sword_time <= 0.0 and (not left_down or slash_lock):
+		elif guard_cooldown <= 0.0 and sword_time <= 0.0 and (not left_down or slash_lock):
 			sword.set_pose("sheathed")
 		sword.set_voxel_fx_simulation(stopped or hit_stop > 0.0,world_scale)
+		_update_sheath_alert(delta,sim_dt)
 	else:
+		_clear_sheath_alert()
 		sword.set_voxel_fx_simulation(true,0.0)
 		effective_runner_speed = 0.0
 		audio.set_runner_motion(speed, 0.0, false, 0.0)
@@ -1018,6 +1046,8 @@ func _enter_slash() -> bool:
 
 
 func _short_slash() -> void:
+	guard_active = false
+	_guard_queued = false
 	slash_energy = 1.0
 	quick_slash_style = quick_slash_index % sword.get_light_slash_count()
 	var definition: Dictionary = sword.get_light_slash_definition(quick_slash_style)
@@ -1059,7 +1089,7 @@ func _cut_path(points: PackedVector2Array, continuous: bool) -> void:
 		if not is_instance_valid(enemy):
 			continue
 		if bool(enemy.get_meta("campaign_staging",false)): continue
-		if enemy.position.z < PLAYER_CUT_MIN_Z or enemy.position.z > -0.5:
+		if enemy.position.z < PLAYER_CUT_MIN_Z or enemy.position.z > PLAYER_CUT_MAX_Z:
 			continue
 		# Snapshot this input's visual style only. Last held segments consumed
 		# on release / guard / speed exhaustion still get held-cut feedback.
@@ -1095,10 +1125,154 @@ func _feedback_contact(point: Vector3, strength: float, kind: String = "hit") ->
 		impact_point = camera.unproject_position(point)
 
 
-func _begin_guard() -> void:
-	if guard_cooldown > 0.0:
-		_notice("振刀回收中 %.2fs" % guard_cooldown, 0.35)
+func _clear_sheath_alert() -> void:
+	_sheath_breath_age = 0.0
+	if is_instance_valid(sword):
+		sword.set_sheath_alert(0.0)
+
+
+func _update_sheath_alert(real_delta: float, world_delta: float) -> void:
+	if state != "playing":
+		_clear_sheath_alert()
 		return
+	var cuttable := false
+	var contact_time := INF if training else _sheath_projectile_contact_time()
+	for enemy in enemies:
+		if not is_instance_valid(enemy) or enemy.dead or enemy.is_queued_for_deletion(): continue
+		if bool(enemy.get_meta("campaign_staging",false)) or enemy.enemy_kind in ["barrier","beam"]: continue
+		if not cuttable and enemy.position.z >= PLAYER_CUT_MIN_Z and enemy.position.z <= PLAYER_CUT_MAX_Z:
+			cuttable = enemy.is_visible_in_tree() and not camera.is_position_behind(enemy.get_aim_point())
+		if not training and victory_timer < 0.0 and contact_time > SHEATH_ALERT_PEAK_LEAD:
+			var horizon := minf(SHEATH_ALERT_LEAD,contact_time)
+			contact_time = minf(contact_time,_sheath_melee_contact_time(enemy,horizon))
+			if contact_time > SHEATH_ALERT_PEAK_LEAD and projectiles.size() < MAX_PROJECTILES:
+				contact_time = minf(contact_time,_sheath_ranged_contact_time(enemy,minf(horizon,contact_time)))
+	var breathing := 0.0
+	if cuttable:
+		if world_delta > 0.0:
+			_sheath_breath_age = fposmod(_sheath_breath_age+real_delta,SHEATH_BREATH_SECONDS)
+		var wave := 0.5-0.5*cos(TAU*_sheath_breath_age/SHEATH_BREATH_SECONDS)
+		breathing = lerpf(0.44,1.0,wave)
+	else:
+		_sheath_breath_age = 0.0
+	var urgency := 1.0-smoothstep(SHEATH_ALERT_PEAK_LEAD,SHEATH_ALERT_LEAD,contact_time)
+	sword.set_sheath_alert(lerpf(breathing,2.0,urgency))
+
+
+func _sheath_melee_contact_time(enemy: Node3D, horizon: float) -> float:
+	if enemy.resolved or bool(enemy.get_meta("entry_active",false)): return INF
+	if SeriesScript.supports(str(enemy.enemy_kind)):
+		return series_combat.time_to_guardable_melee(enemy,horizon)
+	if enemy.enemy_kind in ["boss",BOSS_CARRIER_KIND] or enemy.has_meta("sky_lane") or bool(enemy.get_meta("boss_escort",false)):
+		return INF
+	var action := str(enemy.get_meta("action_state",""))
+	if action not in ["windup","strike"] or bool(enemy.get_meta("impact_done",false)): return INF
+	var duration := float(enemy.get_meta("action_duration",MELEE_STRIKE_SECONDS))
+	var age := float(enemy.get_meta("action_time",0.0))
+	var time := duration*MELEE_CONTACT_PHASE-age if action == "strike" else duration-age+MELEE_STRIKE_SECONDS*MELEE_CONTACT_PHASE
+	return maxf(0.0,time) if time <= horizon and enemy.has_attack_limb() else INF
+
+
+func _sheath_ranged_contact_time(enemy: Node3D, horizon: float) -> float:
+	if bool(enemy.get_meta("entry_active",false)): return INF
+	if SeriesScript.supports(str(enemy.enemy_kind)):
+		return series_combat.time_to_guardable_ranged(enemy,horizon)
+	var action := str(enemy.get_meta("action_state",""))
+	var duration := float(enemy.get_meta("action_duration",1.0))
+	var age := float(enemy.get_meta("action_time",0.0))
+	if enemy.enemy_kind == "boss":
+		if action not in ["boss_windup","boss_strike"] or bool(enemy.get_meta("impact_done",false)): return INF
+		var release := (duration-age+BOSS_STRIKE_SECONDS*BOSS_FIRE_PHASE) if action == "boss_windup" else duration*BOSS_FIRE_PHASE-age
+		var variant := int(enemy.get_meta("action_variant",0))
+		if release >= horizon or not enemy.has_attack_limb(variant): return INF
+		if variant != 1: return maxf(0.0,release)+_forecast_projectile_contact(BOSS_SHOCK_ORIGIN,"shock")
+		var flight := INF
+		for origin: Vector3 in enemy.get_ranged_origins():
+			flight = minf(flight,_forecast_projectile_contact(origin,"missile"))
+		return maxf(0.0,release)+flight
+	if action not in ["ranged_charge","ranged_fire"]: return INF
+	var kind := str(enemy.enemy_kind)
+	var escort := bool(enemy.get_meta("boss_escort",false))
+	var charge_left := maxf(0.0,duration-age) if action == "ranged_charge" else 0.0
+	var fire_duration := (0.30 if escort else _ranged_fire_duration(kind)) if action == "ranged_charge" else duration
+	var shot_index := int(enemy.get_meta("burst_shots",0)) if action == "ranged_fire" else 0
+	if kind == "interceptor" and shot_index >= 3: return INF
+	if kind != "interceptor" and bool(enemy.get_meta("impact_done",false)): return INF
+	var release_phase := _ranged_release_phase(kind,shot_index)
+	var release := charge_left+maxf(0.0,fire_duration*release_phase-(age if action == "ranged_fire" else 0.0))
+	if release >= horizon: return INF
+	if escort:
+		if not is_instance_valid(boss_enemy) or boss_enemy.dead or str(boss_enemy.get_meta("action_state","")) != "recover": return INF
+		var support_left := float(boss_enemy.get_meta("action_duration",0.0))-float(boss_enemy.get_meta("action_time",0.0))
+		if int(boss_enemy.get_meta("escort_support_window",0)) <= 0 or support_left <= release: return INF
+	var origins: Array[Vector3] = enemy.get_ranged_origins()
+	if origins.is_empty(): return INF
+	var advance := 0.0
+	if not escort and not enemy.has_meta("sky_lane") and charge_left > 0.0:
+		advance = _ranged_charge_z(enemy,charge_left)-enemy.position.z
+	var offset := Vector3(0,0,advance)
+	if kind == "interceptor":
+		return release+_forecast_projectile_contact(origins[shot_index%origins.size()]+offset,"bolt")
+	var flight := INF
+	for origin in origins:
+		if kind == "mine_layer":
+			flight = minf(flight,_forecast_projectile_contact(origin+offset,"mine",_mine_aim_offset(enemy,origin),0.70))
+		else:
+			flight = minf(flight,_forecast_projectile_contact(origin+offset,"missile" if kind == "missile_drone" else "bolt"))
+	return release+flight
+
+
+func _sheath_projectile_contact_time() -> float:
+	var earliest := INF
+	for projectile: Dictionary in projectiles:
+		if bool(projectile.reflected) or bool(projectile.get("player_plane_passed",false)): continue
+		var node: Node3D = projectile.node
+		var time := _projectile_player_plane_time(projectile,SHEATH_ALERT_LEAD)
+		var behavior := str(projectile.get("series_behavior",""))
+		if not behavior.is_empty():
+			var delay := maxf(0.0,float(projectile.series_next)-float(projectile.age))
+			if delay <= SHEATH_ALERT_LEAD and delay < time:
+				var origin := node.global_position
+				match behavior:
+					"prime":
+						earliest = minf(earliest,delay+_projectile_flight_contact(origin,projectile.launch_velocity,node.collision_radius))
+					"beacon":
+						var source: Node3D = projectile.source
+						if projectiles.size() < MAX_PROJECTILES and is_instance_valid(source) and not source.dead and source.has_attack_limb():
+							earliest = minf(earliest,delay+_forecast_projectile_contact(origin,"bolt"))
+					"bend":
+						origin += Vector3(projectile.velocity)*delay
+						var target: Vector3 = projectile.series_options.get("target",PROJECTILE_TARGET)
+						var velocity := (target-origin).normalized()*Vector3(projectile.launch_velocity).length()
+						earliest = minf(earliest,delay+_projectile_flight_contact(origin,velocity,node.collision_radius))
+				continue
+		if not is_finite(time) or time >= earliest or not _projectile_touches_player(projectile,time): continue
+		var volley := str(node.get_meta("volley_id",""))
+		if not volley.is_empty() and float(_volley_damage.get(volley,-INF)) > game_clock+time:
+			continue
+		var intercepted := false
+		for reflected: Dictionary in projectiles:
+			if bool(reflected.reflected) and is_finite(_projectile_pair_time(reflected,projectile,time+PROJECTILE_EVENT_TIE_EPSILON)):
+				# Only suppress the warning if the actual event order allows
+				# this interception, including collisions with enemy material.
+				var next := _next_projectile_event(time+PROJECTILE_EVENT_TIE_EPSILON)
+				intercepted = next.get("kind","") == "intercept" and next.other.node == node
+				break
+		if not intercepted: earliest = time
+	return earliest
+
+
+func _begin_guard() -> void:
+	if state != "playing":
+		return
+	if guard_active:
+		# A new press can hold the current stance without refreshing its timing.
+		_guard_tap_released = false
+		return
+	if guard_cooldown > 0.0:
+		_guard_queued = true
+		return
+	_guard_queued = false
 	if slashing:
 		_consume_strokes()
 	if left_down:
@@ -1106,33 +1280,56 @@ func _begin_guard() -> void:
 	left_down = false
 	slashing = false
 	pending_strokes.clear()
-	guard_remaining = 0.30
+	sword_time = 0.0
+	guard_active = true
 	guard_age = 0.0
-	guard_cooldown = 0.40
-	guard_rewarded = false
-	guard_chain_hits = 0
+	_guard_tap_released = false
 	sword.set_pose("parry", 0.0)
 
 
+func _release_guard(allow_tap: bool = true) -> void:
+	_guard_queued = false
+	if not guard_active: return
+	if allow_tap and guard_age < GUARD_TAP_WINDOW:
+		_guard_tap_released = true
+		return
+	guard_active = false
+	sword.set_pose("sheathed")
+
+
+func _update_guard(real_delta: float, world_delta: float) -> void:
+	if guard_cooldown > 0.0:
+		guard_cooldown = maxf(0.0,guard_cooldown-real_delta)
+		if guard_cooldown <= 0.0:
+			if not slashing and sword_time <= 0.0: sword.set_pose("sheathed")
+			if _guard_queued: _begin_guard()
+	if guard_active:
+		guard_age += world_delta
+		if _guard_tap_released and guard_age >= GUARD_TAP_WINDOW:
+			guard_active = false
+			sword.set_pose("sheathed")
+
+
 func _try_guard(source: String = "incoming", enemy: Node3D = null) -> bool:
-	if guard_remaining <= 0.0:
+	if not guard_active:
 		return false
-	guard_chain_hits += 1
-	if guard_rewarded:
-		_record_combat("parry_chain", enemy, {"source": source})
-		return true
-	guard_rewarded = true
-	var precision: float = clampf(1.0 - absf(guard_age - 0.075) / 0.23, 0.0, 1.0)
-	var gain: float = lerpf(5.0, 17.0, precision)
-	speed = minf(MAX_SPEED, speed + gain)
-	gear = gear_for_speed(speed)
+	guard_active = false
+	guard_cooldown = GUARD_RECOVERY_SECONDS
+	var precision := clampf(1.0-absf(guard_age-GUARD_IDEAL_AGE)/GUARD_PRECISION_FALLOFF,0.0,1.0)
+	var precise := precision > GUARD_PRECISE_THRESHOLD
+	var gain := 0.0
+	if precise:
+		var speed_before := speed
+		speed = minf(MAX_SPEED,speed+2.0*lerpf(5.0,17.0,precision))
+		gain = speed-speed_before
+		gear = gear_for_speed(speed)
 	combo += 1
 	score += int(100.0 * (1.0 + precision)) * gear
 	shake = 0.85
 	hit_stop = 0.065
 	parry_pulse = 1.0
 	combat_stats["parries"] = int(combat_stats.get("parries", 0)) + 1
-	_record_combat("parry", enemy, {"source": source, "precision": precision})
+	_record_combat("parry", enemy, {"source": source, "precision": precision, "speed_gain": gain})
 	if sword.has_method("impact"):
 		sword.impact(1.3, true)
 	var contact: Vector3 = sword.get_contact_world_position()
@@ -1143,13 +1340,14 @@ func _try_guard(source: String = "incoming", enemy: Node3D = null) -> bool:
 	stroke_alpha = 0.0
 	blade_path.clear()
 	blade_paths.clear()
-	if precision > 0.83:
+	if precise:
 		combat_stats["perfects"] = int(combat_stats.get("perfects", 0)) + 1
 		audio.play_event("perfect")
-		_notice("完美振刀  +%d 速度" % int(gain), 1.4)
+		var displayed_gain := roundi(gain)
+		_notice("完美振刀  +%d 速度" % displayed_gain if displayed_gain > 0 else "完美振刀", 1.4)
 	else:
 		audio.play_event("parry")
-		_notice("振刀成功  +%d 速度" % int(gain), 1.1)
+		_notice("格挡成功", 1.1)
 	return true
 
 
@@ -1385,8 +1583,8 @@ func _apply_enemy_entry_pose(enemy, phase: float) -> void:
 		anchor.y = 0.0
 		enemy.set_meta("entry_anchor",anchor)
 	var inward: float = -signf(anchor.x)
-	var lateral_limit: float = minf(absf(anchor.x)*0.25,0.65)
-	offset.x = inward*minf(absf(offset.x),lateral_limit)
+	var lateral_limit: float = minf(absf(anchor.x)*0.40,1.0)
+	offset.x = inward*clampf(offset.x,-0.10,lateral_limit)
 	angles.y *= inward if not is_zero_approx(inward) else 1.0
 	angles.z *= inward
 	if enemy.enemy_kind not in FLYING_ENEMIES:
@@ -1417,33 +1615,42 @@ func _apply_flyby_entry_pose(enemy, phase: float) -> void:
 		anchor.y = 0.0
 		enemy.set_meta("entry_anchor",anchor)
 	var side: float = signf(anchor.x) if not is_zero_approx(anchor.x) else (-1.0 if int(enemy.lane_index)%2 == 0 else 1.0)
-	var point: Vector3
-	var yaw: float
-	var bank: float
-	if p < 0.48:
-		var u: float = p/0.48
-		point = Vector3(side*3.6,anchor.y,8.0).lerp(Vector3(side*2.2,anchor.y,-12.0),smoothstep(0.0,1.0,u))
-		yaw = PI
-		bank = -side*0.34*sin(u*PI)
-	elif p < 0.82:
-		var u: float = smoothstep(0.0,1.0,(p-0.48)/0.34)
-		point = Vector3(lerpf(side*2.2,anchor.x,u),anchor.y,-12.0-2.0*sin(u*PI))
-		yaw = side*PI*(1.0-u)
-		bank = side*0.62*sin(u*PI)
-	else:
-		var u: float = smoothstep(0.0,1.0,(p-0.82)/0.18)
-		point = Vector3(anchor.x,anchor.y,-12.0).lerp(anchor,u)
-		yaw = 0.0
-		bank = -side*0.06*sin(u*PI)
-	enemy.position = point
+	var pose: Dictionary = MotionScript.sample_flyby(str(enemy.enemy_kind),anchor,side,p)
+	enemy.position = pose.position
 	enemy.set_action("entry",p)
-	var lift: float = 0.45*sin(p*PI)+0.12*sin(p*TAU)
-	var basis := Basis.from_euler(Vector3(-0.08*sin(p*PI),yaw,bank))
+	var basis := Basis.from_euler(pose.rotation)
 	var pivot := Vector3(0,2.18,0)
-	enemy._rig.transform = Transform3D(basis,Vector3(0,lift,0)+pivot-basis*pivot)*enemy._rig.transform
+	enemy._rig.transform = Transform3D(basis,pivot-basis*pivot)*enemy._rig.transform
+	_apply_flyby_hardware(enemy,p)
 	if p >= 0.12 and not bool(enemy.get_meta("flyby_cue_done",false)):
 		enemy.set_meta("flyby_cue_done",true)
 		audio.play_event("flyby",1.0 if enemy.enemy_kind == "interceptor" else 0.8)
+
+
+func _apply_flyby_hardware(enemy, phase: float) -> void:
+	var kind: String = enemy.enemy_kind
+	if kind not in ["missile_drone","shield_drone","mine_layer"]: return
+	for part in [1,2]:
+		var sign := -1.0 if part == 1 else 1.0
+		var pivot: Vector3
+		var angles: Vector3
+		match kind:
+			"missile_drone":
+				var delay := 0.075*float(part-1)
+				var open: float = MotionScript._entry_pulse(phase,0.54+delay,0.70+delay,0.91+delay)
+				pivot = Vector3(sign*0.60,2.12,0)
+				angles = Vector3(-0.27*open,sign*0.24*open,sign*0.38*open)
+			"shield_drone":
+				var flare: float = MotionScript._entry_pulse(phase,0.30,0.50,0.78)
+				pivot = Vector3(sign*0.30,2.24,-0.05)
+				angles = Vector3(0,sign*0.43*flare,-sign*0.24*flare)
+			_:
+				var delay := 0.065*float(part-1)
+				var extend: float = MotionScript._entry_pulse(phase,0.58+delay,0.74+delay,0.92+delay)
+				pivot = Vector3(sign*0.40,2.16,-0.17)
+				angles = Vector3(0.26*extend,sign*0.34*extend,sign*0.23*extend)
+		var part_basis := Basis.from_euler(angles)
+		enemy._parts[part].transform *= Transform3D(part_basis,pivot-part_basis*pivot)
 
 
 func _finish_enemy_entry(enemy) -> void:
@@ -1490,6 +1697,7 @@ func _release_boss_payload(enemy, release_age: float) -> void:
 	if is_instance_valid(boss_carrier):
 		boss_carrier.set_meta("carrier_depart_age",float(boss_carrier.get_meta("carrier_age",0.0)))
 		boss_carrier.set_meta("carrier_depart_origin",boss_carrier.position)
+		boss_carrier.set_meta("carrier_depart_angles",boss_carrier._rig.basis.get_euler())
 	audio.play_event("boss_release",1.4)
 	_record_combat("boss_payload_release",enemy,{"early":release_age < DEPLOYMENT_RELEASE_SECONDS})
 
@@ -1591,16 +1799,22 @@ func _update_carrier_actor(enemy, sim_dt: float) -> void:
 			enemy.queue_free()
 			return
 	else:
+		var previous_angles: Vector3 = enemy._rig.basis.get_euler()
 		enemy.set_action("carrier",0.0)
 		if not enemy.has_meta("carrier_depart_age") and (not is_instance_valid(boss_enemy) or boss_enemy.dead or not bool(boss_enemy.get_meta("entry_active",false))):
 			enemy.set_meta("carrier_depart_age",age)
 			enemy.set_meta("carrier_depart_origin",enemy.position)
+			enemy.set_meta("carrier_depart_angles",previous_angles)
 		if enemy.has_meta("carrier_depart_age"):
 			var depart: float = maxf(0.0,age-float(enemy.get_meta("carrier_depart_age")))
 			var origin: Vector3 = enemy.get_meta("carrier_depart_origin")
-			var u: float = clampf(depart/3.8,0.0,1.0)
-			enemy.position = origin+Vector3(0,12.0*u*u,-280.0*u*u)
-			enemy._rig.transform = Transform3D(Basis.from_euler(Vector3(-0.12*sin(u*PI),0,-0.05*sin(u*PI))),Vector3.ZERO)
+			var origin_angles: Vector3 = enemy.get_meta("carrier_depart_angles",Vector3.ZERO)
+			var unload := smoothstep(0.0,0.52,depart)
+			var retreat := clampf((depart-0.50)/3.30,0.0,1.0)
+			var bank := MotionScript._entry_pulse(depart,0.44,0.94,2.70)
+			enemy.position = origin+Vector3(-0.72*bank,2.15*unload+11.5*retreat*retreat,-1.2*unload-280.0*retreat*retreat)
+			var angles := origin_angles*(1.0-unload)+Vector3(-0.21*unload*(1.0-retreat),0.08*bank,-0.12*bank)
+			enemy._rig.transform = Transform3D(Basis.from_euler(angles),Vector3.ZERO)
 			enemy.set_carrier_release(smoothstep(0.0,0.65,depart))
 			if depart > 4.0:
 				enemies.erase(enemy)
@@ -1819,6 +2033,24 @@ func _ranged_charge_duration(kind: String) -> float:
 	return 0.65
 
 
+func _ranged_fire_duration(kind: String) -> float:
+	return 0.50 if kind == "interceptor" else (0.30 if kind == "mine_layer" else 0.22)
+
+
+func _ranged_release_phase(kind: String, shot_index: int = 0) -> float:
+	return 0.18+float(shot_index)*0.20 if kind == "interceptor" else 0.25
+
+
+func _ranged_charge_z(enemy: Node3D, sim_dt: float) -> float:
+	if enemy.enemy_kind == "shield_drone" or bool(enemy.get_meta("ranged_standoff",false)):
+		return minf(-22.0,enemy.position.z+(speed*0.10+0.7)*sim_dt)
+	return enemy.position.z+(speed*0.25+2.0)*sim_dt
+
+
+func _mine_aim_offset(enemy: Node3D, origin: Vector3) -> Vector3:
+	return Vector3(clampf((origin.x-enemy.global_position.x)*0.16,-0.18,0.18),clampf((origin.y-2.0)*0.30,-0.10,0.10),0)
+
+
 func _fire_ranged_payload(enemy, burst_index: int = 0) -> bool:
 	# Re-read the actual surviving launch mouths for every burst. Cutting a
 	# weapon during its animation cancels the remaining shots from that part.
@@ -1833,8 +2065,7 @@ func _fire_ranged_payload(enemy, burst_index: int = 0) -> bool:
 			for origin in origins:
 				# Separate approach lines converge inside the player's physical
 				# near-body zone; none appears to miss sideways and still hits.
-				var spread := Vector3(clampf((origin.x-enemy.global_position.x)*0.16,-0.18,0.18),clampf((origin.y-2.0)*0.30,-0.10,0.10),0)
-				_spawn_projectile(origin,"mine",enemy,spread,0.70)
+				_spawn_projectile(origin,"mine",enemy,_mine_aim_offset(enemy,origin),0.70)
 		_:
 			for origin in origins:
 				_spawn_projectile(origin,"missile" if enemy.enemy_kind == "missile_drone" else "bolt",enemy)
@@ -1940,14 +2171,14 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 			"windup":
 				enemy.position.z = lerpf(float(enemy.get_meta("action_start_z", -13.0)), -7.2, smoothstep(0.0, 1.0, phase))
 				if phase >= 1.0:
-					_set_enemy_action(enemy, "strike", 0.28)
+					_set_enemy_action(enemy, "strike", MELEE_STRIKE_SECONDS)
 					audio.play_event("enemy_swing", 1.15 if enemy.enemy_kind == "tank" else 0.8)
 			"strike":
 				# The weapon reaches the player's space at the damage phase, from every lane.
-				var lunge: float = smoothstep(0.0, 0.55, phase)
+				var lunge: float = smoothstep(0.0, MELEE_CONTACT_PHASE, phase)
 				enemy.position.z = lerpf(float(enemy.get_meta("action_start_z", -7.2)), -2.2, lunge)
 				enemy.position.x = lerpf(float(enemy.get_meta("action_start_x", 0.0)), float(enemy.get_meta("lane_x", 0.0)) * 0.18, lunge)
-				if phase >= 0.55 and not bool(enemy.get_meta("impact_done", false)):
+				if phase >= MELEE_CONTACT_PHASE and not bool(enemy.get_meta("impact_done", false)):
 					enemy.set_meta("impact_done", true)
 					enemy.attack_done += 1
 					var armed: bool = enemy.has_attack_limb()
@@ -1977,15 +2208,9 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 					else:
 						_set_enemy_action(enemy, "exit", 1.0)
 			"ranged_charge":
-				if enemy.enemy_kind == "shield_drone" or bool(enemy.get_meta("ranged_standoff",false)):
-					# Extra tell time must not turn into a point-blank release at
-					# high speed. Restored craft use their original charging advance.
-					enemy.position.z = minf(-22.0,enemy.position.z+(speed*0.10+0.7)*sim_dt)
-				else:
-					enemy.position.z += (speed * 0.25 + 2.0) * sim_dt
+				enemy.position.z = _ranged_charge_z(enemy,sim_dt)
 				if phase >= 1.0:
-					var fire_duration := 0.50 if enemy.enemy_kind == "interceptor" else (0.30 if enemy.enemy_kind == "mine_layer" else 0.22)
-					_set_enemy_action(enemy, "ranged_fire", fire_duration)
+					_set_enemy_action(enemy, "ranged_fire", _ranged_fire_duration(str(enemy.enemy_kind)))
 			"ranged_fire":
 				_update_ranged_fire(enemy,phase)
 			"exit":
@@ -2009,11 +2234,11 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 func _update_ranged_fire(enemy, phase: float) -> void:
 	if enemy.enemy_kind == "interceptor":
 		var shot_index: int = int(enemy.get_meta("burst_shots",0))
-		while shot_index < 3 and phase >= 0.18 + float(shot_index)*0.20:
+		while shot_index < 3 and phase >= _ranged_release_phase("interceptor",shot_index):
 			_fire_ranged_payload(enemy,shot_index)
 			shot_index += 1
 			enemy.set_meta("burst_shots",shot_index)
-	elif phase >= 0.25 and not bool(enemy.get_meta("impact_done",false)):
+	elif phase >= _ranged_release_phase(str(enemy.enemy_kind)) and not bool(enemy.get_meta("impact_done",false)):
 		enemy.set_meta("impact_done",true)
 		_fire_ranged_payload(enemy)
 	if phase >= 1.0:
@@ -2047,8 +2272,7 @@ func _update_sky_enemy(enemy, sim_dt: float) -> void:
 					_record_combat("ranged_charge",enemy)
 			"ranged_charge":
 				if phase >= 1.0:
-					var fire_duration := 0.50 if enemy.enemy_kind == "interceptor" else (0.30 if enemy.enemy_kind == "mine_layer" else 0.22)
-					_set_enemy_action(enemy,"ranged_fire",fire_duration)
+					_set_enemy_action(enemy,"ranged_fire",_ranged_fire_duration(str(enemy.enemy_kind)))
 			"ranged_fire":
 				_update_ranged_fire(enemy,phase)
 			"stagger", "recover":
@@ -2132,10 +2356,10 @@ func _update_boss(enemy, sim_dt: float) -> void:
 				audio.play_event("boss_charge", 1.2)
 		"boss_windup":
 			if phase >= 1.0:
-				_set_enemy_action(enemy, "boss_strike", 0.46)
+				_set_enemy_action(enemy, "boss_strike", BOSS_STRIKE_SECONDS)
 				audio.play_event("enemy_swing", 1.5)
 		"boss_strike":
-			if phase >= 0.55 and not bool(enemy.get_meta("impact_done", false)):
+			if phase >= BOSS_FIRE_PHASE and not bool(enemy.get_meta("impact_done", false)):
 				enemy.set_meta("impact_done", true)
 				var variant: int = int(enemy.get_meta("action_variant", 0))
 				if not enemy.has_attack_limb(variant):
@@ -2145,7 +2369,7 @@ func _update_boss(enemy, sim_dt: float) -> void:
 						_spawn_projectile(origin, "missile",enemy)
 					audio.play_event("ranged_fire", 1.2)
 				else:
-					_spawn_projectile(Vector3(0, 1.75, -9.5), "shock",enemy)
+					_spawn_projectile(BOSS_SHOCK_ORIGIN, "shock",enemy)
 					_spawn_impact(Vector3(0, 0.2, -9.0), "launch", 0.8)
 				if enemy.has_attack_limb(variant):
 					_record_combat("attack_impact", enemy, {"variant": variant, "projectile": true})
@@ -2189,12 +2413,27 @@ func _spawn_projectile(origin: Vector3, kind: String, source: Node3D = null, aim
 	node.configure(kind)
 	# Apply the requested reduction to the entire previous launch speed.
 	# Once launched, the straight projectile keeps this velocity snapshot.
-	var travel_speed := (speed + (38.0 if kind in ["bolt","needle","buckshot"] else 30.0)) * PROJECTILE_SPEED_SCALE * speed_multiplier
-	var velocity := (Vector3(0.0, 1.65, -0.9) + aim_offset - origin).normalized() * travel_speed
+	var velocity := _projectile_launch_velocity(origin,kind,aim_offset,speed_multiplier)
 	node.advance(0.00001, velocity)
 	projectiles.append({"node":node, "velocity":velocity, "kind":kind, "source":source, "reflected":false, "age":0.0})
 	_record_combat("projectile_spawn", source, {"projectile_kind":kind})
 	return node
+
+
+func _projectile_launch_velocity(origin: Vector3, kind: String, aim_offset: Vector3, speed_multiplier: float) -> Vector3:
+	var travel_speed := (speed+(38.0 if kind in ["bolt","needle","buckshot"] else 30.0))*PROJECTILE_SPEED_SCALE*speed_multiplier
+	return (PROJECTILE_TARGET+aim_offset-origin).normalized()*travel_speed
+
+
+func _forecast_projectile_contact(origin: Vector3, kind: String, aim_offset: Vector3 = Vector3.ZERO, speed_multiplier: float = 1.0) -> float:
+	var radius := float(ProjectileScript.GeometryScript.get_template(kind).radius)
+	return _projectile_flight_contact(origin,_projectile_launch_velocity(origin,kind,aim_offset,speed_multiplier),radius)
+
+
+func _projectile_flight_contact(origin: Vector3, velocity: Vector3, radius: float) -> float:
+	if origin.z < PROJECTILE_TARGET.z and velocity.z <= 0.0: return INF
+	var time := maxf(0.0,(PROJECTILE_TARGET.z-origin.z)/maxf(velocity.z,0.00001))
+	return time if _projectile_point_touches_player(origin+velocity*time,radius) else INF
 
 
 func _update_projectiles(sim_dt: float) -> void:
@@ -2342,6 +2581,25 @@ func _projectile_pair_time(a: Dictionary, b: Dictionary, sim_dt: float) -> float
 	return fraction*sim_dt if fraction >= 0.0 and fraction <= 1.0 else INF
 
 
+func _projectile_player_plane_time(projectile: Dictionary, sim_dt: float) -> float:
+	if bool(projectile.reflected) or bool(projectile.get("player_plane_passed",false)): return INF
+	var from_z: float = float(projectile.node.global_position.z)
+	var delta_z: float = float(projectile.velocity.z)*sim_dt
+	if from_z+delta_z < -0.90001: return INF
+	return clampf((-0.9-from_z)/maxf(delta_z,0.00001),0.0,1.0)*sim_dt
+
+
+func _projectile_touches_player(projectile: Dictionary, time: float) -> bool:
+	var point: Vector3 = projectile.node.global_position+Vector3(projectile.velocity)*time
+	return _projectile_point_touches_player(point,float(projectile.node.collision_radius))
+
+
+func _projectile_point_touches_player(point: Vector3, radius: float) -> bool:
+	var body_point := Vector2(0,clampf(point.y,0.9,1.65))
+	var reach := 0.31+radius
+	return Vector2(point.x,point.y).distance_squared_to(body_point) <= reach*reach
+
+
 func _next_projectile_event(sim_dt: float) -> Dictionary:
 	var earliest := sim_dt+1.0
 	var event: Dictionary = {}
@@ -2368,17 +2626,10 @@ func _next_projectile_event(sim_dt: float) -> Dictionary:
 				earliest = time
 				event = {"kind":"enemy","time":time,"projectile":projectile,"target":enemy,"point":hit.point}
 	for projectile: Dictionary in projectiles:
-		if bool(projectile.reflected) or bool(projectile.get("player_plane_passed",false)): continue
-		var from_z: float = float(projectile.node.global_position.z)
-		var delta_z: float = float(projectile.velocity.z)*sim_dt
-		if from_z+delta_z < -0.90001: continue
-		var time: float = clampf((-0.9-from_z)/maxf(delta_z,0.00001),0.0,1.0)*sim_dt
+		var time := _projectile_player_plane_time(projectile,sim_dt)
 		if time <= sim_dt and time < earliest-PROJECTILE_EVENT_TIE_EPSILON:
 			earliest = time
-			var point: Vector3 = projectile.node.global_position+Vector3(projectile.velocity)*time
-			var body_point := Vector2(0,clampf(point.y,0.9,1.65))
-			var reach := 0.31+float(projectile.node.collision_radius)
-			var touches := Vector2(point.x,point.y).distance_squared_to(body_point) <= reach*reach
+			var touches := _projectile_touches_player(projectile,time)
 			event = {"kind":"player" if touches else "miss","time":time,"projectile":projectile}
 	return event
 
@@ -2722,7 +2973,7 @@ func _update_hud() -> void:
 		"campaign_phase":campaign.phase if campaign != null else "menu","run_time":campaign.run_time if campaign != null else elapsed,
 		"state": state, "speed": speed, "gear": gear, "health": health,
 		"score": score, "kills": kills, "combo": combo, "time": elapsed,
-		"duration": route_duration, "slow": slashing, "parry": guard_remaining / 0.30,
+		"duration": route_duration, "slow": slashing, "parry": 1.0 if guard_active else 0.0,
 		"cursor": slash_cursor if slashing else get_viewport().get_visible_rect().size * 0.5,
 		"blade_from": stroke_from, "blade_to": stroke_to, "blade_alpha": stroke_alpha,
 		"blade_path": blade_path,

@@ -12,6 +12,68 @@ const GROUND_ENTRY_FADE_END_PHASE := 0.42
 const ENTRY_SLASHER_DRAG_PITCH := 1.0293675
 const ENTRY_TANK_PLANT_PITCH := 0.8153234
 
+# Phase, road-relative root (vertical offset from lane), body pitch/yaw/roll. The final key
+# blends into the actual ground/sky/escort anchor supplied by the encounter.
+const FLYBY_KEYS := {
+	"drone": [
+		[0.0, Vector3(3.10,-0.65,7.0), Vector3(0.06,PI,-0.12)],
+		[0.34, Vector3(1.55,-0.77,-8.8), Vector3(0.10,PI,-0.32)],
+		[0.53, Vector3(1.10,-0.26,-10.5), Vector3(-0.70,1.10,0.40)],
+		[0.68, Vector3(1.55,0.25,-11.6), Vector3(-0.25,0,0.12)],
+		[0.80, Vector3(1.62,-0.09,-12.0), Vector3(0.14,0,-0.08)],
+	],
+	"missile_drone": [
+		[0.0, Vector3(2.30,1.05,7.5), Vector3(-0.10,PI,0.08)],
+		[0.23, Vector3(2.20,1.22,-5.0), Vector3(-0.08,2.72,0.23)],
+		[0.52, Vector3(0.80,-0.49,-15.8), Vector3(0.55,1.55,0.54)],
+		[0.70, Vector3(1.18,0.52,-15.9), Vector3(-0.62,0.18,-0.22)],
+		[0.85, Vector3(1.36,0.12,-16.8), Vector3(0.09,0,-0.04)],
+	],
+	"shield_drone": [
+		[0.0, Vector3(3.05,0.05,7.8), Vector3(0.02,2.75,-0.20)],
+		[0.30, Vector3(2.08,0.44,-9.6), Vector3(0.02,2.05,-0.98)],
+		[0.53, Vector3(0.74,0.22,-10.9), Vector3(-0.12,0.70,0.51)],
+		[0.72, Vector3(1.30,-0.07,-11.7), Vector3(-0.23,0.02,0)],
+		[0.86, Vector3(1.47,0.02,-13.0), Vector3(0.03,0,0)],
+	],
+	"interceptor": [
+		[0.0, Vector3(3.24,0.15,9.0), Vector3(0.08,PI,-0.10)],
+		[0.22, Vector3(1.00,-0.42,-12.0), Vector3(0.14,2.85,-0.52)],
+		[0.48, Vector3(2.46,0.58,-19.5), Vector3(-0.25,1.72,1.08)],
+		[0.66, Vector3(2.08,0.31,-18.8), Vector3(-0.12,0.14,-0.31)],
+		[0.79, Vector3(1.98,0.26,-18.8), Vector3(-0.10,0,-0.24)],
+	],
+	"mine_layer": [
+		[0.0, Vector3(2.90,0.48,8.0), Vector3(-0.07,2.80,-0.10)],
+		[0.35, Vector3(2.12,0.57,-8.5), Vector3(0.06,2.20,-0.31)],
+		[0.61, Vector3(0.74,-0.72,-13.8), Vector3(0.38,0.58,0.36)],
+		[0.77, Vector3(1.05,0.04,-14.1), Vector3(-0.20,0.04,-0.09)],
+		[0.89, Vector3(1.25,0.09,-15.3), Vector3(-0.06,0,0.03)],
+	],
+}
+
+
+static func sample_flyby(kind: String, anchor: Vector3, side: float, phase: float) -> Dictionary:
+	var keys: Array = FLYBY_KEYS[kind]
+	var p := clampf(phase,0.0,1.0)
+	var previous: Array = keys[0]
+	for index in range(1,keys.size()+1):
+		var next: Array = keys[index] if index < keys.size() else [1.0,Vector3(anchor.x*side,0,anchor.z),Vector3.ZERO]
+		if p <= float(next[0]):
+			var weight := smoothstep(float(previous[0]),float(next[0]),p)
+			var point := Vector3(previous[1]).lerp(next[1],weight)
+			var rotation := Vector3(previous[2]).lerp(next[2],weight)
+			# Sky-lane units still pass below the industrial gantries. Keep the
+			# roll/dive pattern, then regain the authored hold altitude at handoff.
+			var clearance := 0.88*(1.0-smoothstep(0.85,1.0,p)) if anchor.y > 2.0 else 0.0
+			return {"position":Vector3(side*point.x,anchor.y+point.y-clearance,point.z),"rotation":Vector3(rotation.x,side*rotation.y,side*rotation.z)}
+		previous = next
+	return {"position":anchor,"rotation":Vector3.ZERO}
+
+
+static func _entry_pulse(p: float, start: float, peak: float, end: float) -> float:
+	return smoothstep(start,peak,p)*(1.0-smoothstep(peak,end,p))
+
 
 # Ground samples are root-relative. The owner supplies the aircraft world
 # fly-by and transport drop while sharing these durations and part phases.
@@ -38,21 +100,22 @@ static func sample_entry(kind: String, _lane: int, phase: float) -> Dictionary:
 	match kind:
 		"normal":
 			var slide: float = smoothstep(0.0,0.34,p)
-			var launch: float = smoothstep(0.52,0.82,p)
-			var guard: float = smoothstep(0.82,1.0,p)
-			offset = Vector3(lerpf(1.6,0.10,slide)*(1.0-launch),0,lerpf(-5.5,-0.8,slide)*(1.0-launch))
-			angles.y = lerpf(0.85,-0.65,launch)*(1.0-guard)
+			var launch: float = smoothstep(0.55,0.83,p)
+			var guard: float = smoothstep(0.86,1.0,p)
+			offset = Vector3(lerpf(1.3,-0.15,slide)*(1.0-launch),0,lerpf(-5.5,-0.55,slide)*(1.0-launch))
+			angles.y = lerpf(1.12,0.31,slide)*(1.0-launch)-0.68*launch*(1.0-guard)
 		"tank":
-			var leap: float = smoothstep(0.02,0.20,p)
-			var land: float = smoothstep(0.25,0.38,p)
-			var extract: float = smoothstep(0.58,0.84,p)
-			offset = Vector3(0.25*(1.0-land),1.60*leap*(1.0-land),-4.6*(1.0-smoothstep(0.0,0.38,p)))
-			angles.y = 0.18*(1.0-extract)
+			var lift: float = _entry_pulse(p,0.03,0.22,0.38)
+			var land: float = smoothstep(0.21,0.38,p)
+			var extract: float = smoothstep(0.58,0.90,p)
+			offset = Vector3(0.60*(1.0-land),2.35*lift,-4.6*(1.0-smoothstep(0.0,0.38,p)))
+			angles.y = 0.48*(1.0-land)-0.22*land*(1.0-extract)
 		"ranged":
-			var brake: float = smoothstep(0.0,0.30,p)
-			var lock: float = smoothstep(0.70,1.0,p)
-			offset = Vector3(1.8*(1.0-brake),0,lerpf(-5.0,-0.45,brake)*(1.0-lock))
-			angles.y = lerpf(0.95,0.32,brake)*(1.0-lock)
+			var withdraw := smoothstep(0.0,0.30,p)
+			var swing := smoothstep(0.37,0.62,p)
+			var lock := smoothstep(0.74,1.0,p)
+			offset = Vector3(lerpf(-1.1,0.72,withdraw)*(1.0-lock),0,lerpf(-5.0,-0.60,withdraw)*(1.0-lock))
+			angles.y = lerpf(-1.16,0.82,swing)*(1.0-lock)
 		_:
 			# The owner supplies the complete behind-camera fly-by and turn,
 			# or the transport ship's suspended Boss drop. Never stack a second
@@ -90,54 +153,63 @@ static func sample_entry_body(kind: String, lane: int, phase: float, run_phase: 
 	var feet_blend: float = 0.0
 	match kind:
 		"normal":
-			var rise: float = smoothstep(0.52,0.84,p)
-			var ready: float = smoothstep(0.84,1.0,p)
+			var rise: float = smoothstep(0.53,0.83,p)
+			var ready: float = smoothstep(0.87,1.0,p)
 			var drag: float = 1.0-rise
 			var draw: float = rise*(1.0-ready)
-			angles = Vector3(0,side*0.10,0)*drag+Vector3(0.10,-side*0.75,0)*draw+run_angles*ready
-			offset.y = -0.55*drag-0.08*draw
-			var draw_arm: Vector3 = Vector3(ENTRY_SLASHER_DRAG_PITCH,-0.12,-0.10).lerp(Vector3(-0.35,0.12,-0.90),rise)
+			var crouch := smoothstep(0.06,0.31,p)
+			angles = Vector3(0,side*0.10,0)*drag+Vector3(-0.18,-side*0.65,0.10*side)*draw+run_angles*ready
+			offset.y = -0.55*drag*crouch-0.04*draw
+			var draw_arm: Vector3 = Vector3(ENTRY_SLASHER_DRAG_PITCH,-0.12,-0.10).lerp(Vector3(-1.12,0.34,-1.06),rise)
 			# Lift/turn the blade clear before lowering the shoulder pitch. A
 			# direct angle blend would briefly drive the long tip through deck.
-			draw_arm.x = lerpf(ENTRY_SLASHER_DRAG_PITCH,-0.35,smoothstep(0.45,1.0,rise))
+			draw_arm.x = lerpf(ENTRY_SLASHER_DRAG_PITCH,-1.12,smoothstep(0.42,1.0,rise))
 			right = draw_arm.lerp(run_right,ready)
 			left = Vector3(-0.65,0.10,0.70)*drag+Vector3(-0.35,0,-0.40)*draw+run_left*ready
-			left_foot = Vector3(-0.10,0,0.22)*drag+Vector3(0.05,0.08,-0.18)*draw
-			right_foot = Vector3(0.04,0.02,-0.38)*drag+Vector3(0.04,0,0.28)*draw
+			left_foot = Vector3(-0.10,0,0.22)*drag+Vector3(0.05,0.12,-0.24)*draw
+			right_foot = Vector3(0.04,0.02,-0.38)*drag+Vector3(0.04,0,0.33)*draw
 			feet_blend = 1.0-ready
 		"tank":
-			var land: float = smoothstep(0.25,0.38,p)
-			var extract: float = smoothstep(0.58,0.82,p)
+			var land: float = smoothstep(0.26,0.38,p)
+			var extract: float = smoothstep(0.56,0.83,p)
 			var ready: float = smoothstep(0.82,1.0,p)
+			var carry := smoothstep(0.76,0.85,p)
 			var air: float = 1.0-land
-			angles = Vector3(0.06*air,0,0).lerp(run_angles,ready)
+			var raise_hammer := _entry_pulse(p,0.02,0.22,0.36)
+			angles = Vector3(0.06*air-0.17*raise_hammer-0.10*extract*(1.0-carry),0,0).lerp(run_angles,ready)
 			offset.y = (-0.22*air-0.42*land*(1.0-extract)-0.12*extract)*(1.0-ready)
-			right = Vector3(1.65,0,-0.25).lerp(Vector3(ENTRY_TANK_PLANT_PITCH,0,-0.06),land).lerp(Vector3(1.15,0,-0.50),extract).lerp(run_right,ready)
-			left = Vector3(1.65,0,0.25).lerp(Vector3(ENTRY_TANK_PLANT_PITCH,0,0.06),land).lerp(Vector3(1.15,0,0.50),extract).lerp(run_left,ready)
-			left_foot = Vector3(-0.18,0.25*air,0.05)
-			right_foot = Vector3(0.18,0.25*air,-0.05)
+			var right_carry := Vector3(1.70,0,-0.61).lerp(Vector3(1.15,0,-0.50),carry)
+			var left_carry := Vector3(1.34,0,0.42).lerp(Vector3(1.15,0,0.50),carry)
+			right = Vector3(1.62+0.90*raise_hammer,0,-0.25).lerp(Vector3(ENTRY_TANK_PLANT_PITCH,0,-0.06),land).lerp(right_carry,extract).lerp(run_right,ready)
+			left = Vector3(1.62+0.56*raise_hammer,0,0.25).lerp(Vector3(ENTRY_TANK_PLANT_PITCH,0,0.06),land).lerp(left_carry,extract).lerp(run_left,ready)
+			left_foot = Vector3(-0.20,0.33*air,-0.12*air+0.16*land).lerp(Vector3(-0.18,0,0.05),carry)
+			right_foot = Vector3(0.20,0.28*air,0.12*air-0.10*land).lerp(Vector3(0.18,0,-0.05),carry)
 			feet_blend = 1.0-ready
 		"ranged":
-			var ready: float = smoothstep(0.70,1.0,p)
-			angles = Vector3(0,side*0.30,0).lerp(run_angles,ready)
-			offset.y = -0.24*(1.0-ready)
+			var ready: float = smoothstep(0.76,1.0,p)
+			var weight_shift := _entry_pulse(p,0.08,0.37,0.76)
+			var gun_sweep := _entry_pulse(p,0.34,0.55,0.73)
+			angles = Vector3(0.23*weight_shift,side*0.24*gun_sweep,-side*0.28*weight_shift).lerp(run_angles,ready)
+			offset = Vector3(-side*0.12*weight_shift,-0.38*weight_shift-0.10*(1.0-ready),0.11*gun_sweep)
 			right = Vector3(0.28,0,-0.12).lerp(run_right,ready)
 			left = Vector3(0.22,0,0.15).lerp(run_left,ready)
-			left_foot = Vector3(-0.10,0,0.25)
-			right_foot = Vector3(0.10,0,-0.25)
+			left_foot = Vector3(-0.19,0.12*_entry_pulse(p,0.02,0.16,0.33),0.34*weight_shift)
+			right_foot = Vector3(0.22,0.10*_entry_pulse(p,0.15,0.29,0.48),-0.37*weight_shift)
 			feet_blend = 1.0-ready
 		"boss":
 			var suspended: float = 1.0-smoothstep(0.56,0.72,p)
-			var impact: float = smoothstep(0.72,0.755,p)
-			var rise: float = smoothstep(0.88,1.0,p)
+			var falling := _entry_pulse(p,0.56,0.66,0.73)
+			var impact: float = smoothstep(0.72,0.77,p)
+			var rise: float = smoothstep(0.81,1.0,p)
 			var load: float = impact*(1.0-rise)
-			var display: float = smoothstep(0.88,0.94,p)*(1.0-smoothstep(0.96,1.0,p))
-			angles = Vector3(0.08,0,0)*suspended+Vector3(0.22,0,0)*load+Vector3(0.16,boss_side*0.28,0)*rise
-			offset.y = -0.62*load-0.12*rise
-			right = Vector3(0.80,0,-0.65)*suspended+Vector3(0.75,0,-0.30)*load+Vector3(-0.65,0,0.18)*rise+Vector3(0,0,-0.65)*display
-			left = Vector3(0.80,0,0.65)*suspended+Vector3(0.75,0,0.30)*load+Vector3(0.18,0,0.22)*rise+Vector3(0,0,0.65)*display
-			left_foot = Vector3(-0.15,0.80,-0.45)*suspended+Vector3(-0.18,0,0.14)*load
-			right_foot = Vector3(0.15,0.80,-0.45)*suspended+Vector3(0.18,0,0.14)*load
+			var open_right := _entry_pulse(p,0.79,0.86,0.95)
+			var open_left := _entry_pulse(p,0.86,0.93,1.0)
+			angles = Vector3(0.08,0,0)*suspended+Vector3(0.38,0,0.08)*load+Vector3(0.16,boss_side*0.28,0)*rise+Vector3(-0.13,-0.13,0)*falling
+			offset.y = -0.48*load-0.12*rise
+			right = Vector3(0.80,0,-0.65)*suspended+Vector3(0.65,0,-0.30)*load+Vector3(-0.65,0,0.18)*rise+Vector3(0.24,0,1.28)*open_right
+			left = Vector3(0.80,0,0.65)*suspended+Vector3(0.93,0,0.25)*load+Vector3(0.18,0,0.22)*rise+Vector3(-0.32,0,-1.38)*open_left
+			left_foot = Vector3(-0.15,0.80,-0.45)*suspended+Vector3(-0.23,0,-0.13)*load
+			right_foot = Vector3(0.15,0.69,-0.30)*suspended+Vector3(0.25,0,0.26)*load
 			feet_blend = 1.0
 	return {"angles":angles,"offset":offset,"left_arm":left,"right_arm":right,"left_foot":left_foot,"right_foot":right_foot,"feet_blend":feet_blend}
 

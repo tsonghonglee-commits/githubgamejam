@@ -2,7 +2,27 @@
 
 使用 **Godot 4.7.2 stable / GDScript** 制作的 Game Off 2026 参赛项目。
 当前方向为 **3D 第一人称自动奔跑 + 太刀斩击**。玩家固定横向位置、无法换道，迎击四条敌人跑道与三条仅供飞行怪使用的天空道；包含四档速度、振刀加速、慢动作轨迹斩击和关键部位体素切断。
-电脑版 **v0.11.7** 加强水墨宗师与星际无畏舰的攻击节奏，重做四个新系列共十个 Boss 的登场。宗师增加可振刀截断的回身次斩，无畏舰改用有炮口预告的四拍炮列。四个系列分别加入入场音色，并配合落地、破浪或刹停播放冲击效果。[Windows 试玩包](builds/Slay-the-highway-v0.11.7-Windows.zip) · [实包入场检查](builds/boss-entry-review-v0117/final-native/review.json) · [战斗对照](builds/boss-pressure-review-v0117/comparison-receipt.json)
+电脑版 **v0.12.11** 将提速奖励限定为精准振刀，奖励翻倍，最佳时机最高加 34 m/s，速度上限为 60 m/s。长按可架刀挡下一击。
+
+历史 **v0.12.10** 扩大刀鞘强红光的辉光，目标是在可格挡攻击命中前约 0.4 秒达到最亮。按住右键可维持架势，挡下一击后收刀。[Windows 试玩包](builds/Slay-the-highway-v0.12.10-Windows.zip) · [实包检查](builds/held-guard-review/actual-v01210-native/review.json)
+
+历史 **v0.12.9** 在刀鞘双横纹加入振刀提示。有敌人进入可斩范围时红光轻微呼吸，预计可格挡攻击即将命中时亮起强红光。[Windows 试玩包](builds/Slay-the-highway-v0.12.9-Windows.zip) · [实包检查](builds/sheath-alert-review/actual-native/review.json)
+
+历史 **v0.12.8** 恢复 v0.12.4 的轻切、重切和振刀效果。后四系列继续使用手工重制的 Boss 互动建筑与入场。[Windows 试玩包](builds/Slay-the-highway-v0.12.8-Windows.zip) · [验证记录](builds/skill-application-review/vfx-rollback-v0128-final/application-validation.json)
+
+历史 **v0.12.7** 重做后四系列的 Boss 互动建筑。峡谷木门、赛博检修场、风暴海闸和轨道干船坞均取材于现有关卡，建筑与所在路段共享实际材质。[四区原速对照](builds/arena-art-v0127/media/boss-architecture-before-after.mp4) · [实机画面对照](builds/arena-art-v0127/media/boss-architecture-before-after.jpg) · [当时验证记录](builds/skill-application-review/arena-art-v0127-pilot/application-validation.json)
+
+历史 **v0.12.6** 将后四系列 Boss 场地接进实际路段。机关随路肩移动，Boss 通过门位后接回战位。[当时验证报告](builds/skill-application-review/terrain-v0126-verified/application-validation.json)
+
+历史 **v0.12.5** 修正旋翼净空引起的单直升机跳变，恢复水墨宗师的远距跃落。后四区加入场景奇观和 Boss 入场机关，轻切、重切和振刀分别加入独立接触反馈。[当时验证报告](builds/skill-application-review/spectacle-v0125-final/application-validation.json)
+
+历史 **v0.12.4** 重编 35 种怪物和工业运兵船的入场，接入赛博四人实际吊挂和同机回归。[逐怪需求表](docs/MONSTER_ANIMATION_REQUIREMENTS.md) · [当时验证报告](builds/skill-application-review/ink-v0124-final/animation-validation.json)
+
+历史 **v0.12.3** 优化重型切割和场景预建，并调整水墨宗师落地后的屈膝卸力与双剑错拍开锋。固定刀路实包对照中，四重型同斩的切割帧中位从 178.5 ms 降至 162.4 ms，仍有明显长帧。隔离场景构建的 CPU 中位从 925.9 ms 降至 418.2 ms，网格与换段状态一致。[Windows 试玩包](builds/Slay-the-highway-v0.12.3-Windows.zip) · [宗师入场对照](builds/skill-motion-p2/ink-entry-before-after.gif) · [验证报告](builds/skill-application-review/integrated/application-validation.json)
+
+历史 **v0.12.1** 以 GitHub 检查点 v0.11.7 为基础，恢复握柄跟手的自由斩切与当时的战斗表现，保留切割选格、连通判定和网格重建优化。[Windows 试玩包](builds/Slay-the-highway-v0.12.1-Windows.zip) · [自由斩切对照](builds/rollback-cut-native/free-cut-comparison.json) · [重切性能对照](builds/rollback-cut-native/fixed-cut-comparison.json)
+
+历史 **v0.11.7** 加强水墨宗师与星际无畏舰的攻击节奏，重做四个新系列共十个 Boss 的登场。宗师增加可振刀截断的回身次斩，无畏舰改用有炮口预告的四拍炮列。四个系列分别加入入场音色，并配合落地、破浪或刹停播放冲击效果。[Windows 试玩包](builds/Slay-the-highway-v0.11.7-Windows.zip) · [实包入场检查](builds/boss-entry-review-v0117/final-native/review.json) · [战斗对照](builds/boss-pressure-review-v0117/comparison-receipt.json)
 
 历史 **v0.11.6** 让第一系列运输船载着 Boss 从 64m 外飞近，在飞行前 0.5 秒渐显，再全显飞行 1.25 秒到达下降点。顶棚在渐显结束后打开，护卫直接飞入。实包复核了入场、提前释放以及三个出口的死亡交接。[v0.11.6 Windows 包](builds/Slay-the-highway-v0.11.6-Windows.zip) · [当时专项记录](builds/first-series-exit-review-v0116/final-native/review.json)
 
@@ -133,7 +153,7 @@ v0.9.5 ZIP SHA-256：`02B2DB4D74754E192C80488F5C8DF522595E1935D997EA36D72226E104
 | 鼠标移动 | 常态小幅转头；长斩从当前实体刀姿接管，握点固定在刀柄中央；刀柄领向移动方向、刀尖拖后，实际刃腹留下一条窄切口，镜头 / FOV 和停鼠刀姿不回正 |
 | 左键按下 / 连续短按 | 按下立即轻击，十二式大幅过刀、依次衔接且相邻不重复；允许刀身短暂出屏，快速连点不吞刀；不奖励速度 |
 | 左键保持或按住拖动 | 进入慢动作轨迹斩击；拖动可立即进入，持续耗速；到最低速度自动收刀 |
-| 右键短按 | 振刀；同一短窗口可挡多道同步攻击，每次振刀只奖励一次速度 |
+| 右键 | 轻按或短时间内精准振刀可提速。长按可维持架势，格挡一击后收刀 |
 | Shift 按住 | 提速，第四档封顶；与长斩同时使用仍然净耗速 |
 | Esc | 暂停 / 继续 |
 
@@ -153,7 +173,7 @@ v0.9.5 ZIP SHA-256：`02B2DB4D74754E192C80488F5C8DF522595E1935D997EA36D72226E104
 击杀由关键体素部位被实际切断 / 破坏触发，不能用普通血量归零替代切割判定。
 本轮先以五格生命、约 180 秒固定路线后接 Boss 为调试目标；这些不是最终平衡数值。
 v0.2 调试速度为初始 18、最低 4、最高 60；长斩每实际秒消耗 10，同时按 Shift 时净消耗 8。初始状态可以直接长斩。
-切割范围暂为 32m。正常战斗通过敌人武器动作、枪口充能与声音预告攻击，临近命中时仅补充小型危险图标；F5 可显示目标状态和时间用于调试。敌人到接敌范围后先蓄势、再挥击并结算伤害，不在跨过距离阈值的瞬间扣血。肉盾左右手先后出招，振刀后有可见的受阻与退身；切断当前攻击所需的手臂可取消该次攻击，并不自动算击杀。
+切割范围暂为 32m。正常战斗通过敌人武器动作、枪口充能、声音和刀鞘强红光预告攻击，F5 可显示目标状态和时间用于调试。敌人到接敌范围后先蓄势、再挥击并结算伤害，不在跨过距离阈值的瞬间扣血。肉盾左右手先后出招，振刀后有可见的受阻与退身；切断当前攻击所需的手臂可取消该次攻击，并不自动算击杀。
 鼠标慢划与快速往返均完整生成实际刃腹接触轨迹，握点本身不充当伤害线，也不会把整根刀扫出的面积当作伤害。松开 / 振刀 / 耗速前的 1px 最后刀路也提交。命中停顿只冻结世界，握点、刀路和实际耗速仍继续更新。
 关键结构断开后，大块保留体素数据并可再次切割，正常战斗中迅速掠过镜头；F4 仍保留低速反复切割。Boss 被击毁后先在死亡位置保持约 1.35 世界秒并出现局部失稳，再主爆炸散开约 1.05 世界秒后结算；慢动作、暂停和命中停顿共用世界时间，期间残敌不再攻击，真实残骸仍可切割。
 首发验证 Windows，Web 导出与最终美术随后验证。

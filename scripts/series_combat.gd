@@ -6,6 +6,12 @@ extends RefCounted
 const Planner = preload("res://scripts/encounter_director.gd")
 const EntryMotion = preload("res://scripts/series_entry_motion.gd")
 const WeaponContact = preload("res://scripts/series_attack_contact.gd")
+const MELEE_FORECAST_STEP := 1.0/60.0
+const MELEE_WINDUP_Z := -7.4
+const RIOT_WINDUP_Z := -6.65
+const INK_FEINT_DURATION := 0.24
+const INK_FEINT_WINDUP := 0.36
+const INK_WARP_LANES := [-3.0,-1.0,1.0,3.0]
 const TEAM_KINDS := ["cyber_captain","cyber_flanker","cyber_suppressor","cyber_spotter"]
 const BOSSES := ["ink_master","cyber_captain","cyber_flanker","cyber_suppressor","cyber_spotter","cyber_helicopter","cyber_tank","cyber_gunship","sea_leviathan","empire_dreadnought"]
 const MINION_BEHAVIORS := {
@@ -79,10 +85,15 @@ func begin_entry(enemy: Node3D) -> void:
 	var info := _info(enemy)
 	var kind := str(enemy.enemy_kind)
 	var duration: float = EntryMotion.DURATIONS.get(kind,info.entry_duration)
+	if enemy.has_meta("series_sling_release"): enemy.remove_meta("series_sling_release")
 	enemy.set_meta("series_entry_authored",kind not in EntryMotion.ORDINARY_FLYERS)
 	enemy.set_meta("series_entry_flash",0)
 	enemy.set_meta("series_entry_cue",false)
 	enemy.set_meta("series_landed",false)
+	if kind in ["sea_leviathan","empire_dreadnought"]: enemy.set_meta("series_entry_fx_mask",0)
+	if kind == "ink_master":
+		enemy.set_meta("ink_entry_draw_mask",0)
+		enemy.set_meta("ink_entry_previous_tip",{})
 	enemy.set_meta("series_behavior",str(MINION_BEHAVIORS.get(str(enemy.enemy_kind),"boss_"+str(enemy.enemy_kind))))
 	enemy.set_meta("series_entry",true)
 	enemy.set_meta("entry",true)
@@ -107,6 +118,24 @@ func begin_entry(enemy: Node3D) -> void:
 	if enemy.has_method("reset_entry_material_budget"): enemy.reset_entry_material_budget()
 	_apply_entry(enemy,0.0)
 	_event("enemy_entry",enemy,{"duration":duration,"series":int(info.series),"sky":enemy.has_meta("sky_lane")})
+
+
+func begin_sling_release(enemy: Node3D, anchor: Vector3, start_age: float) -> void:
+	var suspended_parts: Array[Transform3D] = []
+	for part: Variant in enemy._parts: suspended_parts.append(part.transform)
+	var release := {"position":enemy.position,"rig":enemy._rig.transform,"parts":suspended_parts}
+	enemy.position = anchor
+	begin_entry(enemy)
+	var duration := float(enemy.get_meta("series_entry_duration"))
+	var phase := clampf(start_age/duration,0.0,1.0)
+	release.phase = phase
+	enemy.set_meta("series_sling_release",release)
+	enemy.set_meta("series_entry_cue",true)
+	enemy.set_meta("series_entry_age",start_age)
+	enemy.set_meta("action_phase",phase)
+	enemy.set_meta("combat_phase",phase)
+	_apply_entry(enemy,phase)
+	_event("series_sling_release",enemy,{"phase":phase})
 
 
 func update_actor(enemy: Node3D, sim_dt: float, _world_scale: float) -> void:
@@ -205,8 +234,7 @@ func _set_action(enemy: Node3D, action: String, duration: float) -> void:
 		var order := [0,2,3,1]
 		var step := int(enemy.get_meta("series_warp_step",0))
 		var lane := int(order[step%order.size()])
-		var lanes := [-3.0,-1.0,1.0,3.0]
-		if is_equal_approx(enemy.position.x,float(lanes[lane])):
+		if is_equal_approx(enemy.position.x,float(INK_WARP_LANES[lane])):
 			step += 1
 			lane = int(order[step%order.size()])
 		enemy.set_meta("series_warp_step",step)
@@ -219,7 +247,10 @@ func _event(event_name: String, enemy: Node3D, details: Dictionary = {}) -> void
 
 func _update_entry(enemy: Node3D, dt: float) -> void:
 	var before := enemy.position
-	var age := float(enemy.get_meta("series_entry_age",0.0))+maxf(dt,0.0)
+	var entry_dt := maxf(dt,0.0)
+	if _game.campaign != null:
+		entry_dt = _game.campaign.boss_environment.entry_delta(str(enemy.enemy_kind),entry_dt)
+	var age := float(enemy.get_meta("series_entry_age",0.0))+entry_dt
 	var duration := float(enemy.get_meta("series_entry_duration",2.0))
 	var p := clampf(age/maxf(duration,0.01),0.0,1.0)
 	enemy.set_meta("series_entry_age",age)
@@ -254,6 +285,8 @@ func _apply_entry(enemy: Node3D, p: float) -> void:
 	var sample: Dictionary = EntryMotion.sample(kind,p,int(enemy.lane_index))
 	var offset: Vector3 = sample.get("offset",Vector3.ZERO)
 	var angles: Vector3 = sample.get("rotation",Vector3.ZERO)
+	if bool(info.boss) and _game.campaign != null:
+		offset.z += float(_game.campaign.boss_environment.approach_offset(kind,p))
 	# Upright root preserves fragment-floor and root-motion compensation. The
 	# actual rig carries jumps/ropes/turns; no alternate visual copy is made.
 	enemy.position = anchor+Vector3(0,0,offset.z)
@@ -263,7 +296,19 @@ func _apply_entry(enemy: Node3D, p: float) -> void:
 	enemy._rig.transform = Transform3D(basis,Vector3(offset.x,offset.y,0)+pivot-basis*pivot)*Transform3D(sample.get("rig",Transform3D.IDENTITY))*enemy._rig.transform
 	for part: int in sample.get("parts",{}):
 		if part > 0 and part < enemy._parts.size(): enemy._parts[part].transform = Transform3D(sample.parts[part])*enemy._parts[part].transform
+	if enemy.has_meta("series_sling_release"):
+		var release: Dictionary = enemy.get_meta("series_sling_release")
+		var blend := smoothstep(float(release.phase),float(sample.impact_phase),p)
+		if blend < 1.0:
+			enemy.position = Vector3(release.position).lerp(enemy.position,blend)
+			enemy._rig.transform = Transform3D(release.rig).interpolate_with(enemy._rig.transform,blend)
+			for part in range(1,enemy._parts.size()):
+				enemy._parts[part].transform = Transform3D(release.parts[part]).interpolate_with(enemy._parts[part].transform,blend)
+		else:
+			enemy.remove_meta("series_sling_release")
 	_keep_entry_clear(enemy)
+	if bool(info.boss) and _game.campaign != null:
+		_game.campaign.boss_environment.observe_pass(enemy)
 	if enemy.has_method("set_entry_visibility"): enemy.set_entry_visibility(float(sample.get("opacity",1.0)))
 	var boss := bool(info.boss)
 	var cue_phase := 0.24
@@ -282,6 +327,10 @@ func _apply_entry(enemy: Node3D, p: float) -> void:
 		_burst(enemy,before_point,0.45,0)
 		_burst(enemy,enemy.get_aim_point(),0.65,2)
 		_event("ink_entry_flash",enemy,{"step":flash,"real_rig":true})
+	match kind:
+		"ink_master": _update_ink_entry_draw(enemy,p)
+		"sea_leviathan": _update_leviathan_wake(enemy,p)
+		"empire_dreadnought": _update_dreadnought_brakes(enemy,p)
 	var impact_phase := maxf(float(sample.get("impact_phase",-1.0)),float(sample.get("entry_climax_phase",-1.0)))
 	if impact_phase >= 0.0 and p >= impact_phase and not bool(enemy.get_meta("series_landed",false)):
 		enemy.set_meta("series_landed",true)
@@ -294,6 +343,110 @@ func _apply_entry(enemy: Node3D, p: float) -> void:
 		if str(info.role) == "heavy":
 			_game.audio.play_event("heavy_land",0.7)
 			_game.shake = maxf(float(_game.shake),0.12)
+
+
+func _update_ink_entry_draw(enemy: Node3D, phase: float) -> void:
+	var mask := int(enemy.get_meta("ink_entry_draw_mask",0))
+	var lead_part := 1 if int(enemy.lane_index)%2 == 0 else 2
+	for beat in range(EntryMotion.INK_MASTER_DRAW_PHASES.size()):
+		var start: float = EntryMotion.INK_MASTER_DRAW_PHASES[beat]
+		if phase < start: break
+		var bit := 1 << beat
+		var accent := (mask & bit) == 0
+		if accent:
+			mask |= bit
+			enemy.set_meta("ink_entry_draw_mask",mask)
+		if phase > start + EntryMotion.INK_MASTER_DRAW_WINDOW and not accent: continue
+		var previous: Dictionary = enemy.get_meta("ink_entry_previous_tip",{})
+		if not accent and phase-float(previous.get("phase",-1.0)) < 0.005: continue
+		var part := lead_part if beat == 0 else 3-lead_part
+		var tip := WeaponContact.surviving_tip(enemy,_definitions.integrity_layout("ink_master"),part)
+		if tip.is_empty():
+			enemy.set_meta("ink_entry_previous_tip",{})
+			continue
+		if accent:
+			var sound := "enemy_swing" if beat == 0 else "unsheathe"
+			_game.audio.play_event(sound,1.18)
+			_event("ink_entry_draw",enemy,{"part":part,"sound":sound,"occupied_cell":tip.cell})
+		if previous.get("cell",-1) == tip.cell and is_instance_valid(_game.series_effects):
+			var point: Vector3 = tip.point
+			var from: Vector3 = previous.point
+			var travel := from.distance_squared_to(point)
+			# Accumulate small movements before emitting a visible stroke.
+			if travel <= 0.0144: continue
+			if travel < 16.0:
+				var tint := Color(0.12,0.025,0.042) if beat == 0 else Color(0.76,0.035,0.075)
+				_game.series_effects.emit_trace(from,point,0.17,tint,0.26)
+				var edge := Vector3(0,0.05,0.035)
+				_game.series_effects.emit_trace(from+edge,point+edge,0.042,Color(1.6,0.80,0.58),0.21)
+		tip.phase = phase
+		enemy.set_meta("ink_entry_previous_tip",tip)
+
+
+func _ink_landing_point(enemy: Node3D, fallback: Vector3) -> Vector3:
+	var lowest := INF
+	for part in [5,6]:
+		var mesh: Mesh = enemy._part_meshes[part].mesh
+		if mesh == null: continue
+		var pose: Transform3D = enemy.global_transform*enemy._part_pose(part)
+		var bounds: AABB = pose*mesh.get_aabb()
+		if bounds.position.y < lowest:
+			lowest = bounds.position.y
+			var foot := bounds.get_center()
+			fallback = Vector3(foot.x,0.08,foot.z)
+	return fallback
+
+
+func _update_leviathan_wake(enemy: Node3D, phase: float) -> void:
+	if phase < 0.79 or int(enemy.get_meta("series_entry_fx_mask",0)) != 0: return
+	enemy.set_meta("series_entry_fx_mask",1)
+	var fx = _game.series_effects
+	if not is_instance_valid(fx): return
+	var aim: Vector3 = enemy.get_aim_point()
+	var center := Vector3(aim.x,0.10,enemy.global_position.z+1.2)
+	for side in [-1.0,1.0]:
+		var shore := center+Vector3(side*2.15,0,0)
+		fx.emit_arc(shore,1.9,Vector3.UP,Color(0.38,1.45,1.65),side*PI*0.54,PI*0.80,10.5,0.48)
+		fx.emit_arc(shore+Vector3.UP*0.05,1.55,Vector3.UP,Color(1.56,1.94,1.86),side*PI*0.54,PI*0.67,8.6,0.40)
+	_game.audio.play_event("flyby",0.58)
+	_event("sea_entry_afterwave",enemy,{"sound":"flyby"})
+
+
+func _update_dreadnought_brakes(enemy: Node3D, phase: float) -> void:
+	var mask := int(enemy.get_meta("series_entry_fx_mask",0))
+	for pod: int in [1,2]:
+		var bit := 1 << (pod-1)
+		if phase < 0.54+0.08*pod or (mask&bit) != 0: continue
+		mask |= bit
+		enemy.set_meta("series_entry_fx_mask",mask)
+		var sign := -1.0 if pod == 1 else 1.0
+		var nozzle := Vector3(sign*3.45,2.60,-6.47)
+		if not _dreadnought_nozzle_intact(enemy,pod,nozzle): continue
+		var pose: Transform3D = enemy.global_transform*enemy._part_pose(pod)
+		var from := pose*nozzle
+		var outward := (pose.basis*Vector3.FORWARD).normalized()
+		var fx = _game.series_effects
+		if is_instance_valid(fx):
+			fx.emit_trace(from,from+outward*8.0,0.55,Color(0.28,1.22,2.28),0.55,outward*4.0)
+			fx.emit_trace(from+Vector3.UP*0.18,from+Vector3.UP*0.18+outward*4.2,0.24,Color(1.25,1.82,2.45),0.36,outward*3.2)
+			_burst(enemy,from,0.92,2)
+		_game.audio.play_event("flyby",0.72)
+		_event("empire_entry_brake",enemy,{"part":pod,"point":from,"sound":"flyby"})
+
+
+func _dreadnought_nozzle_intact(enemy: Node3D, part: int, nozzle: Vector3) -> bool:
+	var size: float = enemy._cell
+	var grid_low: Vector3 = enemy._point(0,0,0)-Vector3.ONE*size*0.5
+	var at := Vector3i(((nozzle-grid_low)/size).floor())
+	var dimensions: Vector3i = enemy._dimensions
+	var begin := (at-Vector3i.ONE).clamp(Vector3i.ZERO,dimensions)
+	var end := (at+Vector3i(2,2,2)).clamp(Vector3i.ZERO,dimensions)
+	for z in range(begin.z,end.z):
+		for y in range(begin.y,end.y):
+			for x in range(begin.x,end.x):
+				var index: int = enemy._index(x,y,z)
+				if enemy._voxels[index] == 4 and enemy._part_ids[index] == part: return true
+	return false
 
 
 func _boss_entry_approach(enemy: Node3D, series: int) -> void:
@@ -312,12 +465,6 @@ func _boss_entry_approach(enemy: Node3D, series: int) -> void:
 			_burst(enemy,wake+Vector3(-3.4,0,0),1.25,1)
 			_burst(enemy,wake+Vector3(3.4,0,0),1.25,1)
 			if is_instance_valid(fx): fx.emit_arc(wake,4.4,Vector3.UP,Color(0.62,1.7,2.3),0.0,TAU,6.0,0.74)
-		5:
-			if is_instance_valid(fx):
-				for side in [-1.0,1.0]:
-					var tail := aim+Vector3(side*4.2,-0.8,-4.0)
-					fx.emit_trace(tail,tail+Vector3(0,0,-10.0),0.38,Color(0.36,1.65,2.6),0.64,Vector3(0,0,-5.0))
-					_burst(enemy,tail,0.76,2)
 	_event("series_boss_approach",enemy,{"series":series,"sound":sound})
 
 
@@ -330,11 +477,12 @@ func _boss_entry_arrival(enemy: Node3D, series: int) -> void:
 	var sound := "heavy_land"
 	match kind:
 		"ink_master":
-			strength = 0.78
-			_burst(enemy,contact,1.75,2)
+			strength = 0.96
+			contact = _ink_landing_point(enemy,contact)
+			_burst(enemy,contact,1.55,1)
 			if is_instance_valid(fx):
-				fx.emit_arc(contact,2.1,Vector3.UP,Color(1.7,0.18,0.24),0.0,TAU,10.0,0.58)
-				fx.emit_arc(aim,2.2,Vector3(0.34,0.41,1.0),Color(2.1,1.94,1.73),-1.2,PI*1.23,3.0,0.43)
+				fx.emit_arc(contact,1.25,Vector3.UP,Color(0.07,0.018,0.035),0.0,TAU,8.0,0.46)
+				fx.emit_arc(contact+Vector3.UP*0.04,1.6,Vector3.UP,Color(1.26,0.12,0.17),0.32,PI*1.35,10.0,0.37)
 		"sea_leviathan":
 			strength = 1.15
 			for side in [-1.0,1.0]:
@@ -382,8 +530,13 @@ func _keep_entry_clear(enemy: Node3D) -> void:
 	for part in range(enemy._part_meshes.size()):
 		var mesh: Mesh = enemy._part_meshes[part].mesh
 		if mesh == null: continue
-		var posed := rig if part == 0 else rig*Transform3D(enemy._parts[part].transform)
-		var bounds: AABB = posed*mesh.get_aabb()
+		var local_bounds := mesh.get_aabb()
+		var bounds: AABB
+		if part == 9 and enemy.enemy_kind == "cyber_helicopter":
+			bounds = _helicopter_rotor_sweep(rig,local_bounds)
+		else:
+			var posed := rig if part == 0 else rig*Transform3D(enemy._parts[part].transform)
+			bounds = posed*local_bounds
 		low = minf(low,bounds.position.y)
 		high = maxf(high,bounds.end.y)
 		var at_rail := bounds.position.y+enemy.position.y < 1.02
@@ -399,6 +552,20 @@ func _keep_entry_clear(enemy: Node3D) -> void:
 	rig.origin.x += correction
 	rig.origin.y += clampf(0.0,floor_shift,ceiling-enemy.position.y-high)
 	enemy._rig.transform = rig
+
+
+func _helicopter_rotor_sweep(rig: Transform3D, rotor: AABB) -> AABB:
+	# The authored blades extend to 4.44 m from the hub. Include the tip's
+	# 0.26 m cap and a voxel corner so clearance is independent of blade angle.
+	# Rendering and cut geometry still use the actual spinning part transform.
+	const RADIUS := 4.78
+	var hub := rig*Vector3(0,rotor.get_center().y,-0.30)
+	var half_height := rotor.size.y*0.5
+	var extent := Vector3.ZERO
+	for axis in range(3):
+		var horizontal := Vector2(rig.basis.x[axis],rig.basis.z[axis])
+		extent[axis] = RADIUS*horizontal.length()+half_height*absf(rig.basis.y[axis])
+	return AABB(hub-extent,extent*2.0)
 
 
 func _blend_entry_exit(enemy: Node3D, clock: float) -> void:
@@ -546,13 +713,13 @@ func _update_combat(enemy: Node3D, dt: float) -> void:
 			elif kind == "sea_skimmer": advance = smoothstep(0.25,0.86,phase)
 			elif kind == "empire_lancer": advance = pow(smoothstep(0.20,1.0,phase),2.0)
 			elif kind == "cyber_riot": advance = smoothstep(0.20,1.0,phase)
-			enemy.position.z = lerpf(float(enemy.get_meta("action_start_z",-13.0)),-7.4,advance)
+			enemy.position.z = lerpf(float(enemy.get_meta("action_start_z",-13.0)),MELEE_WINDUP_Z,advance)
 			_behavior_motion(enemy,dt,"windup",phase)
 			if phase >= 1.0:
 				if str(enemy.enemy_kind) == "ink_swordsman" and not bool(enemy.get_meta("series_feint_done",false)):
 					enemy.set_meta("series_feint_done",true)
 					enemy.set_meta("series_feint",true)
-					_set_action(enemy,"feint",0.24)
+					_set_action(enemy,"feint",INK_FEINT_DURATION)
 					_event("series_feint",enemy,{"damaging":false})
 				else:
 					_set_action(enemy,"strike",_strike_duration(enemy,info))
@@ -560,7 +727,7 @@ func _update_combat(enemy: Node3D, dt: float) -> void:
 		"feint":
 			if phase >= 1.0:
 				enemy.set_meta("series_feint",false)
-				_set_action(enemy,"windup",0.36)
+				_set_action(enemy,"windup",INK_FEINT_WINDUP)
 		"strike":
 			_update_strike(enemy,info,phase)
 		"charge":
@@ -748,17 +915,14 @@ func _behavior_motion(enemy: Node3D, _dt: float, action: String, phase: float) -
 	match kind:
 		"ink_master":
 			if action in ["windup","charge"]: _ink_warp(enemy,phase)
-		"ink_crane":
-			# A real mirror pass, including the sky: the port travels with the hull.
-			var inward := -signf(anchor.x) if not is_zero_approx(anchor.x) else (-1.0 if int(enemy.lane_index)%2 == 0 else 1.0)
-			enemy.position.x = clampf(anchor.x+inward*sin(clock*1.45)*1.65,-5.5,5.5)
-			if enemy.has_meta("sky_lane"): enemy.position.z = anchor.z+sin(clock*2.9)*0.85
+		"ink_crane", "sea_eel", "empire_fighter":
+			enemy.position = _ranged_motion_position(kind,enemy.position,anchor,clock,int(enemy.lane_index),enemy.has_meta("sky_lane"))
 		"cyber_breacher":
 			if action == "charge": enemy.position.x = anchor.x-signf(anchor.x if not is_zero_approx(anchor.x) else 1.0)*1.2*sin(phase*PI)
 		"cyber_riot":
 			enemy.set_meta("series_shield_open",0.0 if _support_active(enemy,0) else 1.0)
 			if action == "windup" and _support_active(enemy,0):
-				enemy.position.z = lerpf(float(enemy.get_meta("action_start_z",-13.0)),-6.65,smoothstep(0.0,1.0,phase))
+				enemy.position.z = lerpf(float(enemy.get_meta("action_start_z",-13.0)),RIOT_WINDUP_Z,smoothstep(0.0,1.0,phase))
 		"cyber_sniper":
 			if action == "recover" and enemy.has_meta("series_relocate_to"):
 				var goal := float(enemy.get_meta("series_relocate_to"))
@@ -773,13 +937,10 @@ func _behavior_motion(enemy: Node3D, _dt: float, action: String, phase: float) -
 		"sea_skimmer":
 			enemy.set_meta("series_burrow",0.0)
 			if action == "windup":
-				var side := -1.0 if anchor.x < 0.0 else 1.0
-				enemy.position.x = lerpf(anchor.x,side*0.55,smoothstep(0.25,0.86,phase))+side*sin(phase*PI)*1.8
-		"sea_eel":
-			enemy.position.x = clampf(anchor.x+sin(clock*1.9)*1.30,-5.4,5.4)
+				enemy.position.x = _skimmer_windup_x(anchor.x,phase)
 		"empire_lancer":
 			if action == "windup" and _support_active(enemy,0):
-				enemy.position.x = lerpf(anchor.x,-anchor.x*0.20,smoothstep(0.22,0.92,phase))
+				enemy.position.x = _lancer_windup_x(anchor.x,phase)
 		"empire_sentinel":
 			var opening := 1.0 if not _support_active(enemy,0) else 0.0
 			if _support_active(enemy,0):
@@ -787,15 +948,34 @@ func _behavior_motion(enemy: Node3D, _dt: float, action: String, phase: float) -
 				elif action == "fire": opening = 1.0
 				elif action == "recover": opening = 1.0-smoothstep(0.25,1.0,phase)
 			enemy.set_meta("series_shield_open",opening)
+
+
+func _ranged_motion_position(kind: String, position: Vector3, anchor: Vector3, clock: float, lane: int, sky: bool) -> Vector3:
+	match kind:
+		"ink_crane":
+			# The actual port moves with the mirror pass.
+			var inward := -signf(anchor.x) if not is_zero_approx(anchor.x) else (-1.0 if lane%2 == 0 else 1.0)
+			position.x = clampf(anchor.x+inward*sin(clock*1.45)*1.65,-5.5,5.5)
+			if sky: position.z = anchor.z+sin(clock*2.9)*0.85
+		"sea_eel": position.x = clampf(anchor.x+sin(clock*1.9)*1.30,-5.4,5.4)
 		"empire_fighter":
-			enemy.position.x = clampf(anchor.x+sin(clock*1.10)*3.2,-4.8,4.8)
-			if enemy.has_meta("sky_lane"): enemy.position.z = anchor.z+cos(clock*1.10)*1.8
+			position.x = clampf(anchor.x+sin(clock*1.10)*3.2,-4.8,4.8)
+			if sky: position.z = anchor.z+cos(clock*1.10)*1.8
+	return position
+
+
+func _skimmer_windup_x(anchor_x: float, phase: float) -> float:
+	var side := -1.0 if anchor_x < 0.0 else 1.0
+	return lerpf(anchor_x,side*0.55,smoothstep(0.25,0.86,phase))+side*sin(phase*PI)*1.8
+
+
+func _lancer_windup_x(anchor_x: float, phase: float) -> float:
+	return lerpf(anchor_x,-anchor_x*0.20,smoothstep(0.22,0.92,phase))
 
 
 func _ink_warp(enemy: Node3D, phase: float) -> void:
-	var lanes := [-3.0,-1.0,1.0,3.0]
-	var lane := clampi(int(enemy.get_meta("series_warp_lane",0)),0,3)
-	var target_x := float(lanes[lane])
+	var lane := _ink_warp_lane(enemy)
+	var target_x := float(INK_WARP_LANES[lane])
 	if phase >= 0.08 and not bool(enemy.get_meta("series_warp_told",false)):
 		enemy.set_meta("series_warp_told",true)
 		var current: Vector3 = enemy.get_aim_point()
@@ -818,30 +998,46 @@ func _ink_warp(enemy: Node3D, phase: float) -> void:
 	_event("ink_warp",enemy,{"from":from,"to":enemy.position,"real_root":true})
 
 
+func _ink_warp_lane(enemy: Node3D) -> int:
+	return clampi(int(enemy.get_meta("series_warp_lane",0)),0,INK_WARP_LANES.size()-1)
+
+
 func _behavior_bank(enemy: Node3D) -> void:
 	var kind := str(enemy.enemy_kind)
+	if kind not in ["ink_crane","empire_fighter","sea_eel","sea_skimmer","cyber_breacher"]: return
 	var clock := float(enemy.get_meta("series_clock",0.0))
+	var action := str(enemy.get_meta("action_state",""))
+	var phase := float(enemy.get_meta("action_phase",0.0))
+	var anchor: Vector3 = enemy.get_meta("series_anchor",enemy.position)
+	enemy._rig.transform = _banked_combat_rig(kind,action,phase,clock,anchor.x,int(enemy.lane_index),enemy._rig.transform)
+
+
+func _banked_combat_rig(kind: String, action: String, phase: float, clock: float, anchor_x: float, lane: int, rig: Transform3D) -> Transform3D:
 	var bank := 0.0
 	var lift := 0.0
 	var ease := smoothstep(0.0,0.40,clock)
 	if kind == "ink_crane":
-		var anchor: Vector3 = enemy.get_meta("series_anchor",enemy.position)
-		var inward := -signf(anchor.x) if not is_zero_approx(anchor.x) else (-1.0 if int(enemy.lane_index)%2 == 0 else 1.0)
+		var inward := -signf(anchor_x) if not is_zero_approx(anchor_x) else (-1.0 if lane%2 == 0 else 1.0)
 		bank = -inward*cos(clock*1.45)*0.40*ease
 	elif kind == "empire_fighter":
 		bank = -cos(clock*1.10)*0.44*ease
 		lift = -0.32*ease
 	elif kind == "sea_eel": bank = sin(clock*1.9)*0.21
-	elif kind == "sea_skimmer" and str(enemy.get_meta("action_state","")) == "windup":
-		var p := float(enemy.get_meta("action_phase",0.0))
-		lift = sin(smoothstep(0.22,0.94,p)*PI)*1.65
-		bank = sin(p*TAU)*0.48
-	elif kind == "cyber_breacher" and str(enemy.get_meta("action_state","")) == "charge":
-		lift = 0.65*sin(float(enemy.get_meta("action_phase",0.0))*PI)
-	if is_zero_approx(bank) and is_zero_approx(lift): return
+	elif kind == "sea_skimmer" and action == "windup": return _skimmer_windup_bank(phase)*rig
+	elif kind == "cyber_breacher" and action == "charge": lift = 0.65*sin(phase*PI)
+	if is_zero_approx(bank) and is_zero_approx(lift): return rig
 	var basis := Basis(Vector3.FORWARD,bank)
 	var pivot := Vector3(0,2.18,0)
-	enemy._rig.transform = Transform3D(basis,Vector3(0,lift,0)+pivot-basis*pivot)*enemy._rig.transform
+	return Transform3D(basis,Vector3(0,lift,0)+pivot-basis*pivot)*rig
+
+
+func _skimmer_windup_bank(phase: float) -> Transform3D:
+	var lift := sin(smoothstep(0.22,0.94,phase)*PI)*1.65
+	var bank := sin(phase*TAU)*0.48
+	if is_zero_approx(bank) and is_zero_approx(lift): return Transform3D.IDENTITY
+	var basis := Basis(Vector3.FORWARD,bank)
+	var pivot := Vector3(0,2.18,0)
+	return Transform3D(basis,Vector3(0,lift,0)+pivot-basis*pivot)
 
 
 func _apply_combat_pose(enemy: Node3D, action: String, phase: float) -> void:
@@ -912,10 +1108,9 @@ func _combat_cues(enemy: Node3D, action: String, phase: float) -> void:
 
 func _update_strike(enemy: Node3D, info: Dictionary, phase: float) -> void:
 	var master := str(enemy.enemy_kind) == "ink_master"
-	var lunge := smoothstep(0.0,0.56,phase)
 	var anchor: Vector3 = enemy.get_meta("series_anchor",enemy.position)
-	enemy.position.z = lerpf(float(enemy.get_meta("action_start_z",-7.4)),-2.2,lunge)
-	enemy.position.x = lerpf(float(enemy.get_meta("action_start_x",0.0)),anchor.x*0.06,lunge)
+	var start := _strike_start(enemy)
+	enemy.position = _strike_position(start,anchor.x,phase)
 	_behavior_motion(enemy,0.0,"strike",phase)
 	_apply_combat_pose(enemy,"strike",phase)
 	var contact := WeaponContact.check(enemy,_definitions.integrity_layout(str(enemy.enemy_kind)))
@@ -945,6 +1140,107 @@ func _update_strike(enemy: Node3D, info: Dictionary, phase: float) -> void:
 				return
 			enemy.set_meta("series_cycles",int(enemy.get_meta("series_cycles",0))+1)
 		_finish_attack(enemy,info)
+
+
+func _strike_start(enemy: Node3D) -> Vector3:
+	return Vector3(float(enemy.get_meta("action_start_x",0.0)),enemy.position.y,float(enemy.get_meta("action_start_z",MELEE_WINDUP_Z)))
+
+
+func _strike_position(start: Vector3, anchor_x: float, phase: float) -> Vector3:
+	var lunge := smoothstep(0.0,0.56,phase)
+	return Vector3(lerpf(start.x,anchor_x*0.06,lunge),start.y,lerpf(start.z,-2.2,lunge))
+
+
+func time_to_guardable_melee(enemy: Node3D, horizon: float) -> float:
+	if _definitions == null or horizon <= 0.0 or not is_instance_valid(enemy) or bool(enemy.dead): return INF
+	var action := str(enemy.get_meta("action_state",""))
+	if action not in ["windup","strike","feint"] or bool(enemy.get_meta("series_contact_resolved",false)): return INF
+	if bool(enemy.get_meta("series_entry",false)) or bool(enemy.get_meta("campaign_staging",false)): return INF
+	var kind := str(enemy.enemy_kind)
+	if not _definitions.supports(kind): return INF
+	var action_age := float(enemy.get_meta("action_time",0.0))
+	var duration := float(enemy.get_meta("action_duration",1.0))
+	var windup_left := maxf(0.0,duration-action_age) if action != "strike" else 0.0
+	var real_windup := action == "windup" and (kind != "ink_swordsman" or bool(enemy.get_meta("series_feint_done",false)))
+	if action != "strike" and not real_windup:
+		if action == "windup": windup_left += INK_FEINT_DURATION
+		windup_left += INK_FEINT_WINDUP
+		duration = INK_FEINT_WINDUP
+		action_age = 0.0
+	if windup_left >= horizon: return INF
+	var layout: Dictionary = _definitions.integrity_layout(kind)
+	var weapons := WeaponContact.weapon_candidates(enemy,layout)
+	if weapons.is_empty(): return INF
+	var integrity := _forecast_pose_state(enemy)
+	var start := _strike_start(enemy)
+	var anchor: Vector3 = enemy.get_meta("series_anchor",enemy.position)
+	var lane := int(enemy.lane_index)
+	var clock := float(enemy.get_meta("series_clock",0.0))
+	var handoff_age := clock-float(enemy.get_meta("series_pose_handoff_started",clock))
+	var retained_rig: Transform3D = enemy.get_meta("series_pose_from_rig",Transform3D.IDENTITY)
+	var retained_parts: Array = enemy.get_meta("series_pose_from_parts",[])
+	var previous: Dictionary = enemy.get_meta("series_weapon_previous",{}).duplicate() if action == "strike" else {}
+	if action != "strike":
+		integrity["series_feint"] = false
+		start = _forecast_strike_start(enemy,kind,anchor,integrity)
+		if kind == "ink_master" and not bool(enemy.get_meta("series_warp_done",false)):
+			lane = _ink_warp_lane(enemy)
+			anchor.x = float(INK_WARP_LANES[lane])
+			start.x = anchor.x
+		# Windup hands its last displayed pose to the strike, which checks
+		# contact starting on the following update.
+		var elapsed := maxf(0.0,windup_left-MELEE_FORECAST_STEP)
+		var phase := clampf(1.0-MELEE_FORECAST_STEP/maxf(duration,0.001),0.0,1.0)
+		var pose: Dictionary = _definitions.sample_pose(kind,"windup",phase,float(enemy.age)+elapsed,lane,integrity)
+		retained_rig = pose.rig if elapsed > 0.0 else enemy._rig.transform
+		if elapsed > 0.0 and kind == "sea_skimmer": retained_rig = _skimmer_windup_bank(phase)*retained_rig
+		retained_parts = []
+		for part in range(enemy._parts.size()):
+			retained_parts.append(pose.parts.get(part,Transform3D.IDENTITY) if elapsed > 0.0 else enemy._parts[part].transform)
+		handoff_age = 0.0
+		action_age = 0.0
+		duration = _strike_duration(enemy,_definitions.info(kind))
+	var latest := minf(horizon-windup_left,maxf(0.0,duration-action_age))
+	if latest <= 0.0: return INF
+	var root := enemy.global_transform
+	var parent_space := root*enemy.transform.affine_inverse()
+	var step := 0.0
+	while step < latest:
+		step = minf(step+MELEE_FORECAST_STEP,latest)
+		var phase := clampf((action_age+step)/maxf(duration,0.001),0.0,1.0)
+		var pose: Dictionary = _definitions.sample_pose(kind,"strike",phase,float(enemy.age)+windup_left+step,lane,integrity)
+		var rig: Transform3D = pose.rig
+		var blend := smoothstep(0.0,0.085,handoff_age+step) if not retained_parts.is_empty() else 1.0
+		if blend < 1.0: rig = retained_rig.interpolate_with(rig,blend)
+		root.origin = parent_space*_strike_position(start,anchor.x,phase)
+		for weapon: Dictionary in weapons:
+			var part := int(weapon.part)
+			var joint: Transform3D = pose.parts.get(part,Transform3D.IDENTITY)
+			if blend < 1.0 and part > 0 and part < retained_parts.size(): joint = Transform3D(retained_parts[part]).interpolate_with(joint,blend)
+			var now := root*rig if part == 0 else root*rig*joint
+			var before: Transform3D = previous.get(part,now)
+			if WeaponContact.swept_cell(enemy,weapon,before,now) >= 0:
+				# A surviving cell from the authored segment also satisfies has_series_melee_weapon.
+				return windup_left+step
+			previous[part] = now
+	return INF
+
+
+func _forecast_pose_state(enemy: Node3D) -> Dictionary:
+	var integrity: Dictionary = enemy._series_integrity.duplicate()
+	for key in ["series_attack_variant","series_feint","series_shield_open","series_burrow","series_entry_authored"]:
+		integrity[key] = enemy.get_meta(key,0.0)
+	return integrity
+
+
+func _forecast_strike_start(enemy: Node3D, kind: String, anchor: Vector3, integrity: Dictionary) -> Vector3:
+	var start := enemy.position
+	var supports: Array = integrity.get("support_active",[])
+	var supported := supports.is_empty() or bool(supports[0])
+	start.z = RIOT_WINDUP_Z if kind == "cyber_riot" and supported else MELEE_WINDUP_Z
+	if kind == "sea_skimmer": start.x = _skimmer_windup_x(anchor.x,1.0)
+	elif kind == "empire_lancer" and supported: start.x = _lancer_windup_x(anchor.x,1.0)
+	return start
 
 
 func _count_swing(enemy: Node3D) -> void:
@@ -1045,6 +1341,86 @@ func _shot_phases(kind: String) -> Array:
 	return [0.32]
 
 
+func time_to_guardable_ranged(enemy: Node3D, horizon: float) -> float:
+	if _definitions == null or horizon <= 0.0 or not is_instance_valid(enemy) or bool(enemy.dead): return INF
+	var action := str(enemy.get_meta("action_state",""))
+	if action not in ["charge","fire"] or bool(enemy.get_meta("series_entry",false)) or bool(enemy.get_meta("campaign_staging",false)): return INF
+	var kind := str(enemy.enemy_kind)
+	# These shots have their own post-launch clocks or trajectories.
+	if not _definitions.supports(kind) or kind in ["ink_talisman","cyber_drone","sea_ray"]: return INF
+	var action_age := float(enemy.get_meta("action_time",0.0))
+	var action_duration := float(enemy.get_meta("action_duration",1.0))
+	var charge_left := maxf(0.0,action_duration-action_age) if action == "charge" else 0.0
+	var fire_age := action_age if action == "fire" else 0.0
+	var fire_duration := action_duration if action == "fire" else _fire_duration(kind)
+	var phases := _shot_phases(kind)
+	var mask := int(enemy.get_meta("series_shot_mask",0)) if action == "fire" else 0
+	if charge_left+maxf(0.0,float(phases[0])*fire_duration-fire_age) >= horizon: return INF
+	var emitters: Array[Dictionary] = []
+	for emitter: Dictionary in _definitions.emitters(kind):
+		if enemy._emitter_intact(int(emitter.part)): emitters.append(emitter)
+	if emitters.is_empty(): return INF
+	var clock := float(enemy.get_meta("series_clock",0.0))
+	var lane := int(enemy.lane_index)
+	var sky := enemy.has_meta("sky_lane")
+	var base := enemy.position
+	var anchor: Vector3 = enemy.get_meta("series_anchor",base)
+	if action == "charge" and kind == "cyber_breacher": base.x = anchor.x
+	if action == "charge" and kind == "ink_master" and not bool(enemy.get_meta("series_warp_done",false)):
+		lane = _ink_warp_lane(enemy)
+		anchor.x = float(INK_WARP_LANES[lane])
+		base.x = anchor.x
+	var integrity := _forecast_pose_state(enemy)
+	if kind == "empire_sentinel": integrity["series_shield_open"] = 1.0
+	var root := enemy.global_transform
+	var parent_space := root*enemy.transform.affine_inverse()
+	var cycles := int(enemy.get_meta("series_cycles",0))
+	var shot_kind := _shot_kind(enemy)
+	var earliest := INF
+	for index in range(phases.size()):
+		if mask & (1<<index): continue
+		var phase := maxf(float(phases[index]),fire_age/maxf(fire_duration,0.001))
+		var launch := charge_left+maxf(0.0,phase*fire_duration-fire_age)
+		if launch >= minf(horizon,earliest): break
+		# Every scheduled firing beat comes after the .085 s pose handoff.
+		var pose: Dictionary = _definitions.sample_pose(kind,"fire",phase,float(enemy.age)+launch,lane,integrity)
+		var rig := _banked_combat_rig(kind,"fire",phase,clock+launch,anchor.x,lane,pose.rig)
+		root.origin = parent_space*_ranged_motion_position(kind,base,anchor,clock+launch,lane,sky)
+		if kind == "empire_dreadnought":
+			var battery: int = _dreadnought_battery_order(enemy)[index]
+			for emitter: Dictionary in emitters:
+				if int(emitter.part) != battery: continue
+				var origin := _forecast_muzzle(root*rig,pose.parts,emitter)
+				var flight: float = _game._forecast_projectile_contact(origin,_battery_projectile_kind(battery),Vector3.ZERO,_battery_speed_multiplier(battery))
+				earliest = minf(earliest,launch+flight)
+				break
+			continue
+		var ports := _burst_port_count(kind,emitters.size())
+		for port in range(ports):
+			var emitter := emitters[(index+port+cycles)%emitters.size()]
+			var origin := _forecast_muzzle(root*rig,pose.parts,emitter)
+			var flight: float = _game._forecast_projectile_contact(origin,shot_kind,_burst_spread(kind,ports,port,index))
+			earliest = minf(earliest,launch+flight)
+	return earliest if earliest <= horizon else INF
+
+
+func _forecast_muzzle(rig: Transform3D, parts: Dictionary, emitter: Dictionary) -> Vector3:
+	var part := int(emitter.part)
+	if part != 0: rig *= Transform3D(parts.get(part,Transform3D.IDENTITY))
+	return rig*Vector3(emitter.point)
+
+
+func _burst_port_count(kind: String, live_ports: int) -> int:
+	if kind == "cyber_breacher": return 3
+	return mini(live_ports,2 if kind in ["sea_leviathan","cyber_gunship"] else 1)
+
+
+func _burst_spread(kind: String, ports: int, port: int, index: int) -> Vector3:
+	if kind == "ink_talisman": return Vector3((float(index)-1.0)*0.55,0,0)
+	var spread := (float(port)-float(ports-1)*0.5)*0.36
+	return Vector3(spread*2.0 if kind == "cyber_breacher" else spread,0,0)
+
+
 func _fire_step(enemy: Node3D, phase: float) -> void:
 	var kind := str(enemy.enemy_kind)
 	var phases := _shot_phases(kind)
@@ -1064,16 +1440,13 @@ func _fire_step(enemy: Node3D, phase: float) -> void:
 		if origins.is_empty():
 			_event("disarmed",enemy,{"cancelled_burst":index})
 			continue
-		var ports := mini(origins.size(),2 if kind in ["sea_leviathan","cyber_gunship"] else 1)
-		if kind == "cyber_breacher": ports = 3
+		var ports := _burst_port_count(kind,origins.size())
 		var cycles := int(enemy.get_meta("series_cycles",0))
 		for port in range(ports):
 			var origin: Vector3 = origins[(index+port+cycles)%origins.size()]
-			var spread := Vector3((float(port)-float(ports-1)*0.5)*0.36,0,0)
-			if kind == "cyber_breacher": spread.x *= 2.0
+			var spread := _burst_spread(kind,ports,port,index)
 			if kind == "ink_talisman":
 				origin += Vector3((float(index)-1.0)*0.75,0.5*sin(float(index)*PI*0.5),0.3)
-				spread = Vector3((float(index)-1.0)*0.55,0,0)
 			var node: Node3D = _game._spawn_projectile(origin,_shot_kind(enemy),enemy,spread,1.0)
 			if not is_instance_valid(node): continue
 			if _shot_kind(enemy) == "sword_wave": node.set_meta("roll",(-0.58 if index%2 == 0 else 0.58))
@@ -1107,6 +1480,14 @@ func _dreadnought_battery_origin(enemy: Node3D, part: int) -> Vector3:
 	return Vector3.INF
 
 
+func _battery_projectile_kind(part: int) -> String:
+	return "cannon_orb" if part == 0 else "plasma_lance"
+
+
+func _battery_speed_multiplier(part: int) -> float:
+	return 0.96 if part == 0 else 1.0
+
+
 func _fire_dreadnought_battery(enemy: Node3D, index: int) -> void:
 	# Aim each beat separately. Missing batteries leave real gaps in the salvo.
 	var part: int = _dreadnought_battery_order(enemy)[index]
@@ -1114,8 +1495,8 @@ func _fire_dreadnought_battery(enemy: Node3D, index: int) -> void:
 	if not origin.is_finite():
 		_event("disarmed",enemy,{"cancelled_burst":index,"battery":part})
 		return
-	var projectile_kind := "cannon_orb" if part == 0 else "plasma_lance"
-	var node: Node3D = _game._spawn_projectile(origin,projectile_kind,enemy,Vector3.ZERO,0.96 if part == 0 else 1.0)
+	var projectile_kind := _battery_projectile_kind(part)
+	var node: Node3D = _game._spawn_projectile(origin,projectile_kind,enemy,Vector3.ZERO,_battery_speed_multiplier(part))
 	if not is_instance_valid(node): return
 	_counters.shots += 1
 	_burst(enemy,origin,0.52 if part == 0 else 0.28,1)

@@ -36,6 +36,7 @@ var clock := 0.0
 var next_decision := 0.0
 var attack_after := 0.0
 var block_after := 0.0
+var parry_held := false
 var left_held := false
 var shift_held := false
 var release_at := 0.0
@@ -201,7 +202,7 @@ func _press_parry(threat: Dictionary) -> void:
 	parry_decisions.append(decision)
 	_release_left()
 	_send_button(true, MOUSE_BUTTON_RIGHT)
-	_send_button(false, MOUSE_BUTTON_RIGHT)
+	parry_held = true
 	block_after = clock + 0.42
 	attack_after = maxf(attack_after, clock + 0.22)
 	input_counts.parry_presses += 1
@@ -290,7 +291,7 @@ func _observe(dt: float) -> void:
 	if game.practice or game.training:
 		forbidden_mode_seen = true
 	if game.health != health_before:
-		damage_samples.append({"at": clock, "world": game.game_clock, "before": health_before, "after": game.health, "speed": game.speed, "guard_remaining": game.guard_remaining, "guard_age": game.guard_age, "guard_cooldown": game.guard_cooldown, "since_last_parry_input": clock - block_after + 0.42})
+		damage_samples.append({"at": clock, "world": game.game_clock, "before": health_before, "after": game.health, "speed": game.speed, "guard_active": game.guard_active, "guard_age": game.guard_age, "guard_cooldown": game.guard_cooldown, "since_last_parry_input": clock - block_after + 0.42})
 		health_before = game.health
 	_observe_fragments()
 	if fast_mode:
@@ -630,6 +631,10 @@ func _control(dt: float) -> void:
 		return
 	if game.state != "playing":
 		return
+	if parry_held:
+		if game.guard_active and clock < block_after: return
+		_send_button(false,MOUSE_BUTTON_RIGHT)
+		parry_held = false
 	if game.boss_spawned and boss_strikes_seen < 2:
 		_release_left()
 	if left_held:
