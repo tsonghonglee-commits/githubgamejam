@@ -15,6 +15,8 @@ Godot 引擎不属于本仓库原创内容，其许可和署名见 [Godot Licens
 | `scripts/prototype_audio.gd` | 本项目 | 本仓库 | MIT | 原创程序合成战斗音效、分层奔跑风声及金属脚步，无外部采样 |
 | `scripts/projectile_view.gd`、`scripts/projectile_geometry.gd`、`scripts/voxel_blast.gd` | 本项目 | 本仓库 | MIT | 原创程序化实体弹壳 / 尾翼、方块爆炸和反射识别，无参考作品资产 |
 | `scripts/enemy_motion.gd`、`scripts/route_sections.gd` | 本项目 | 本仓库 | MIT | 原创脚掌支撑 / 双段腿 IK 与四章工业跑道构件，未引入外部动作或场景资产 |
+| `scripts/series_*.gd`、`scripts/campaign_*.gd` | 本项目 | 本仓库 | MIT | 原创系列体素构造、动作、场景、有限特效与四关编排；无参考游戏模型、动画、音效或贴图资产 |
+| `docs/concepts/v0100/*.png` | 本项目使用内置图像生成工具制作 | 本仓库概念目录 | 随项目提供 | 原创制作参考板，不是游戏截图；未作为贴图或不可切模型外壳加入运行包 |
 
 原型使用 Codex 协助编写程序化模型、界面和音效逻辑。参考作品用于设计研究；未引入其模型、贴图、音频或代码资产。
 

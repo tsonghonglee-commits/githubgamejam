@@ -54,7 +54,9 @@ func _baseline_contract() -> void:
 				var value: Dictionary = Director.plan(index,float(elapsed)/180.0,speed,180.0)
 				deterministic = deterministic and value == Director.plan(index,float(elapsed)/180.0,speed,180.0)
 				for item: Dictionary in value.spawns: shield_reserved = shield_reserved and item.kind != "shield_drone"
-				var special := (index == 22 and elapsed >= 75.0) or (index == 13 and elapsed >= 50.0) or (index == 25 and elapsed >= 90.0) or (index == 37 and elapsed >= 130.0)
+				for item: Dictionary in value.sky_spawns: shield_reserved = shield_reserved and item.kind != "shield_drone"
+				var sky: bool = (index == 9 and elapsed >= 20.0) or (index == 26 and elapsed >= 90.0) or (index == 42 and elapsed >= 150.0)
+				var special: bool = sky or (index == 22 and elapsed >= 75.0) or (index == 13 and elapsed >= 50.0) or (index == 25 and elapsed >= 90.0) or (index == 37 and elapsed >= 130.0)
 				if special: continue
 				samples += 1
 				var kind: String = sequence[index%12]
@@ -100,7 +102,7 @@ func _special_slots() -> void:
 	var row: Dictionary = Director.plan(22,0.5,18.0,180.0)
 	var lanes: Array = []
 	var delays: Array = []
-	var aligned := row.spawns.size() == 4
+	var aligned: bool = row.spawns.size() == 4
 	for item: Dictionary in row.spawns:
 		lanes.append(int(item.lane));delays.append(float(item.attack_delay))
 		aligned = aligned and item.kind == "normal" and is_zero_approx(float(item.z_offset))
@@ -120,6 +122,42 @@ func _special_slots() -> void:
 	observations["exceptions"] = {"row":row,"advanced_indices":[13,25,37]}
 
 
+func _sky_slots() -> void:
+	# Independent expected slots, not the production constant. This contract
+	# covers proposal data only; live admission, safe retirement and sustained
+	# fire remain main-scene responsibilities and are not simulated here.
+	var expected := [{"index":9,"time":20.0,"kind":"drone","lane":1},{"index":26,"time":90.0,"kind":"drone","lane":0},{"index":42,"time":150.0,"kind":"missile_drone","lane":2}]
+	var gated := true
+	var substitution := true
+	var cadence := true
+	var isolated := true
+	for item: Dictionary in expected:
+		var before: Dictionary = Director.plan(int(item.index),(float(item.time)-0.01)/180.0,18.0,180.0)
+		var after: Dictionary = Director.plan(int(item.index),float(item.time)/180.0,18.0,180.0)
+		gated = gated and before.sky_spawns.is_empty() and before.spawns.size() == 1 and before.spawns[0].kind == item.kind
+		var correct: bool = after.sky_spawns.size() == 1
+		if correct:
+			var sky: Dictionary = after.sky_spawns[0]
+			correct = sky.kind == item.kind and int(sky.sky_lane) == int(item.lane)
+		substitution = substitution and correct and after.spawns.is_empty() and not after.advanced_intro and after.baseline_kind == item.kind
+		cadence = cadence and not after.hold_until_clear and is_zero_approx(float(after.recovery_seconds)) and is_equal_approx(float(after.interval),4.3 if item.time < 40.0 else 3.5) and is_equal_approx(float(after.lead_seconds),2.0)
+	for elapsed in [0.0,19.99,20.0,75.0,90.0,149.99,150.0,180.0]:
+		for index in range(96):
+			var value: Dictionary = Director.plan(index,float(elapsed)/180.0,18.0,180.0)
+			isolated = isolated and value.has("sky_spawns") and value.sky_spawns.size() <= 1
+			for sky: Dictionary in value.sky_spawns:
+				isolated = isolated and sky.kind in ["drone","missile_drone"] and int(sky.sky_lane) in [0,1,2] and index in [9,26,42] and elapsed >= 20.0
+	var changed: Dictionary = Director.plan(9,20.0/180.0,18.0,180.0)
+	changed.sky_spawns[0].sky_lane = 99
+	var fresh := int(Director.plan(9,20.0/180.0,18.0,180.0).sky_spawns[0].sky_lane) == 1
+	expect(gated,"only sky slots9/26/42 activate after their20/90/150second gates")
+	expect(substitution,"each sky slot substitutes one original flyer and uses lanes1/0/2 without a ground duplicate")
+	expect(cadence,"optional sky substitutions keep the ordinary timed cadence and never request an all-clear hold")
+	expect(isolated,"every proposal has sky_spawns and only the three one-time flyer slots can use sky lanes0..2")
+	expect(fresh,"mutating a returned sky spawn cannot corrupt the fixed sky schedule")
+	observations["sky_slots"] = expected
+
+
 func _timeline_contract() -> void:
 	var routes: Array = []
 	for duration in [20.0,60.0,180.0]:
@@ -127,6 +165,7 @@ func _timeline_contract() -> void:
 		var index := 0
 		var row_count := 0
 		var advanced := 0
+		var sky_count := 0
 		var gated := true
 		var timeline: Array = []
 		while time < float(duration)-0.00001 and index < 100:
@@ -135,11 +174,13 @@ func _timeline_contract() -> void:
 			if value.advanced_intro:
 				advanced += 1
 				gated = gated and ((index == 13 and time >= 50.0) or (index == 25 and time >= 90.0) or (index == 37 and time >= 130.0))
-			timeline.append({"time":time,"index":index,"id":value.id,"count":value.spawns.size()})
+			sky_count += value.sky_spawns.size()
+			timeline.append({"time":time,"index":index,"id":value.id,"count":value.spawns.size(),"sky_count":value.sky_spawns.size()})
 			time += float(value.interval)
 			index += 1
 		var correct := row_count == (1 if duration == 180.0 else 0) and gated and advanced <= (3 if duration == 180.0 else (1 if duration == 60.0 else 0))
 		expect(correct,"the "+str(int(duration))+"s nominal stream has no forced opening row and at most the agreed rare substitutions",{"waves":index,"rows":row_count,"advanced":advanced})
+		expect(sky_count == (3 if duration == 180.0 else (1 if duration == 60.0 else 0)),"the "+str(int(duration))+"s nominal stream adds only its eligible sparse sky substitutions",{"sky_proposals":sky_count})
 		routes.append({"duration":duration,"timeline":timeline,"scope":"Nominal timed proposals only; main-scene admission limits can postpone a slot."})
 	observations["nominal_routes"] = routes
 
@@ -150,6 +191,7 @@ func _run() -> void:
 		expect(not row.raw_exists and not str(row.runtime_path).is_empty() and str(row.runtime_path) != "res://scripts/encounter_director.gd" and not str(row.sha256).is_empty(),"standalone schedule uses its exported compiled resource without raw source fallback",row)
 	_baseline_contract()
 	_special_slots()
+	_sky_slots()
 	_timeline_contract()
 	var changed: Dictionary = Director.plan(2,0.20,18.0)
 	changed.spawns[0].lane = 99

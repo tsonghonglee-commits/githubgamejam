@@ -10,11 +10,35 @@ const ProjectileScript = preload("res://scripts/projectile_view.gd")
 const BlastScript = preload("res://scripts/voxel_blast.gd")
 const RouteScript = preload("res://scripts/route_sections.gd")
 const EncounterScript = preload("res://scripts/encounter_director.gd")
+const MotionScript = preload("res://scripts/enemy_motion.gd")
+const CarrierScript = preload("res://scripts/carrier_archetype.gd")
+const SeriesScript = preload("res://scripts/series_archetypes.gd")
+const CampaignRuntimeScript = preload("res://scripts/campaign_runtime.gd")
+const SeriesCombatScript = preload("res://scripts/series_combat.gd")
+const SeriesSceneryScript = preload("res://scripts/series_scenery.gd")
+const SeriesEffectsScript = preload("res://scripts/series_effects.gd")
+const ENEMY_SERIES := "SERIES_01"
+const ENEMY_SERIES_LABEL := "第一系列"
+const BOSS_CARRIER_KIND := "boss_carrier"
+const DEPLOYMENT_FADE_SECONDS := 0.5
+const DEPLOYMENT_OPEN_SECONDS := 1.2
+const DEPLOYMENT_APPROACH_SECONDS := 1.75
+const DEPLOYMENT_RELEASE_SECONDS := DEPLOYMENT_APPROACH_SECONDS + 2.11
+const DEPLOYMENT_CARRIER_ENTRY := Vector3(0,14.0,-64.0)
+const DEPLOYMENT_DESCENT_START := Vector3(0,13.2,-26.0)
+const DEPLOYMENT_MOUNT_POINT := Vector3(0,4.17,-0.45)
+const DEPLOYMENT_FALL_SECONDS := 0.96
+const DEPLOYMENT_SETTLE_SECONDS := 1.68
+const DEPLOYMENT_SECONDS := DEPLOYMENT_RELEASE_SECONDS + DEPLOYMENT_FALL_SECONDS + DEPLOYMENT_SETTLE_SECONDS
 const MAX_PROJECTILES := 24
+const MAX_PROJECTILE_EVENTS := MAX_PROJECTILES*2
 const MAX_BLASTS := 12
 const ENEMY_RUN_SPEED := 2.8
+const PLAYER_CUT_MIN_Z := -32.0
+const GROUND_ENTRY_Z := PLAYER_CUT_MIN_Z-8.0
 const PROJECTILE_SPEED_SCALE: float = 2.0 / 3.0
-const REFLECTED_BLAST_RADII := {"bolt":0.90,"shock":1.15,"missile":1.45,"mine":1.25}
+const PROJECTILE_EVENT_TIE_EPSILON: float = 0.000001
+const REFLECTED_BLAST_RADII := {"bolt":0.90,"shock":1.15,"missile":1.45,"mine":1.25,"sword_wave":1.1,"ink_spear":0.95,"seal":1.05,"buckshot":0.75,"needle":0.85,"beacon":0.9,"electric_wave":1.15,"torpedo":1.45,"plasma_lance":1.7,"cannon_orb":1.3}
 const FLYING_ENEMIES := ["drone","missile_drone","shield_drone","interceptor","mine_layer"]
 const RANGED_ENEMIES := ["ranged","drone","missile_drone","shield_drone","interceptor","mine_layer"]
 const MIN_SPEED: float = 4.0
@@ -31,6 +55,13 @@ const ROAD_LOOP_LENGTH: float = ROAD_TILE_COUNT * ROAD_TILE_LENGTH
 const LONG_PRESS: float = 0.13
 const SLOW_SCALE: float = 0.22
 const LANES: Array[float] = [-3.0, -1.0, 1.0, 3.0]
+const SKY_LANES: Array[float] = [-3.2, 0.0, 3.2]
+const SKY_ROOT_Y := 3.0
+const SKY_HOLD_Z := -22.0
+const SKY_ENTRY_Z := -31.0
+const MAX_SKY_ENEMIES := 1
+const BOSS_DEATH_HOLD := 1.35
+const BOSS_DEATH_TAIL := 1.05
 const UI_PREFERENCES_FILE := "user://ui_preferences.cfg"
 
 @export var route_duration: float = ROUTE_DURATION
@@ -46,6 +77,7 @@ var elapsed: float = 0.0
 var game_clock: float = 0.0
 var practice: bool = false
 var training: bool = false
+var invincible: bool = false
 var shift_down: bool = false
 var left_down: bool = false
 var left_time: float = 0.0
@@ -85,6 +117,11 @@ var wave_index: int = 0
 var spawn_timer: float = 2.8
 var boss_spawned: bool = false
 var boss_enemy: Node3D
+var boss_carrier: Node3D
+var deployment_clearance: Array[Dictionary] = []
+var deployment_clearance_age := 0.0
+var landing_impact_age := 10.0
+var landing_impact_strength := 0.0
 var boss_timer: float = 2.5
 var boss_pattern: int = 0
 var message: String = ""
@@ -144,6 +181,11 @@ var _ui_preferences_enabled := true
 var _ui_settings_dirty := false
 var _ui_settings_save_delay := 0.0
 var _ui_pointer_capture_until_release := false
+var campaign: RefCounted
+var series_combat: RefCounted
+var series_scenery: Node3D
+var series_effects: Node3D
+var _volley_damage: Dictionary = {}
 
 
 func _ready() -> void:
@@ -154,15 +196,26 @@ func _ready() -> void:
 	if OS.has_feature("android") or OS.has_feature("ios"):
 		Engine.max_fps = 60
 	_build_world()
+	series_scenery = SeriesSceneryScript.new()
+	add_child(series_scenery)
+	series_scenery.configure(self,road_segments)
+	series_effects = SeriesEffectsScript.new()
+	add_child(series_effects)
+	series_effects.configure()
+	series_combat = SeriesCombatScript.new()
+	series_combat.configure(self)
+	campaign = CampaignRuntimeScript.new()
+	campaign.configure(self)
 	_build_interface()
 	sword.visible = false
 	_load_ui_settings()
 	ProjectileScript.prewarm()
 	EnemyScript.prewarm_normal_model()
-	EnemyScript.prewarm_models(["tank", "ranged", "boss", "drone", "missile_drone", "barrier", "beam", "shield_drone", "interceptor", "mine_layer"])
+	EnemyScript.prewarm_models(["tank", "ranged", "boss", "drone", "missile_drone", "barrier", "beam", "shield_drone", "interceptor", "mine_layer", BOSS_CARRIER_KIND])
 	_build_menu_showcase()
+	campaign.prepare_new_run(false)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	print("Slay the highway / 杀路 v0.9.10 restored craft ready | Godot ", Engine.get_version_info().string)
+	print("Slay the highway / 杀路 v0.11.7 four-stage campaign ready | Godot ", Engine.get_version_info().string)
 	if "--preview" in OS.get_cmdline_user_args():
 		start_game()
 		_spawn_enemy("normal", 1, -10.0)
@@ -245,6 +298,9 @@ func _input(event: InputEvent) -> void:
 				_notice("练习模式：生命保留至少一格" if practice else "标准模式：五格生命", 3.0)
 			KEY_F3:
 				if state == "playing":
+					if campaign != null and campaign.active:
+						campaign.begin_boss()
+						return
 					if boss_spawned and is_instance_valid(boss_enemy) and not boss_enemy.dead:
 						return
 					training = false
@@ -256,6 +312,11 @@ func _input(event: InputEvent) -> void:
 				_start_cutting_lab()
 			KEY_F5:
 				show_timing = not show_timing
+			KEY_F6:
+				if state == "playing" and not touch_mode:
+					invincible = not invincible
+					_notice("无敌已开启" if invincible else "无敌已关闭")
+					get_viewport().set_input_as_handled()
 	if event is InputEventMouseMotion and state == "playing":
 		var movement: Vector2 = event.relative
 		if left_down and not slashing and not slash_lock:
@@ -335,6 +396,19 @@ func mobile_look_drag(movement: Vector2) -> void:
 
 
 func start_game() -> void:
+	if campaign != null and not training and not campaign.ensure_ready_for_start():
+		start_when_menu_prepared = true
+		state = "menu"
+		_reset_input()
+		sword.visible = false
+		for enemy in enemies:
+			if is_instance_valid(enemy): enemy.set_meta("simulation_scale",0.0)
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		return
+	_restore_deployment_clearance()
+	boss_carrier = null
+	landing_impact_age = 10.0
+	landing_impact_strength = 0.0
 	_clear_retiring_enemies()
 	start_when_menu_prepared = false
 	if is_instance_valid(menu_showcase):
@@ -352,10 +426,12 @@ func start_game() -> void:
 	state = "playing"
 	sword.visible = true
 	combat_events.clear()
+	_volley_damage.clear()
 	combat_stats = {"parries": 0, "perfects": 0, "hits_taken": 0, "projectiles_cut": 0, "windups": 0, "impacts": 0, "kills": 0, "slash_time": 0.0}
 	speed = BASE_SPEED
 	gear = 1
 	health = 5
+	invincible = false
 	score = 0
 	kills = 0
 	combo = 0
@@ -422,6 +498,7 @@ func start_game() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if touch_mode else Input.MOUSE_MODE_CAPTURED
 	audio.play_event("start")
 	_notice("斩断发光核心或颈腰连接 · 任意一道漏敌都会受伤", 6.0)
+	if campaign != null and not training: campaign.begin_run()
 	_record_combat("start")
 
 
@@ -439,7 +516,7 @@ func _build_menu_showcase() -> void:
 	back.name = "PreparationCover"
 	back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	var models: Array[Node3D] = []
-	for kind in ["normal","tank","ranged","boss","drone","missile_drone","barrier","beam","normal","shield_drone","interceptor","mine_layer"]:
+	for kind in ["normal","tank","ranged","boss","drone","missile_drone","barrier","beam","normal","shield_drone","interceptor","mine_layer",BOSS_CARRIER_KIND]:
 		var actor = EnemyScript.new()
 		menu_showcase.add_child(actor)
 		actor.configure(kind,1)
@@ -465,8 +542,8 @@ func _build_menu_showcase() -> void:
 	menu_showcase.add_child(portrait)
 	portrait.configure("normal",1)
 	portrait.name = "MenuPortrait"
-	portrait.position = Vector3(3.3,-0.055,-5.8)
-	portrait.scale = Vector3.ONE*1.2
+	portrait.position = Vector3(3.42,-0.16,-5.7)
+	portrait.scale = Vector3.ONE*1.6
 	portrait.set_meta("simulation_scale",0.0)
 	portrait.set_action("recover",1.0)
 	# Warm the actual cut-particle variant from a real, noncritical material
@@ -474,6 +551,11 @@ func _build_menu_showcase() -> void:
 	var cut_point: Vector3 = models[0].to_global(models[0]._part_pose(1)*Vector3(-0.70,1.475,0.20))
 	var screen := camera.unproject_position(cut_point)
 	models[0].cut_screen(camera,screen-Vector2(4,0),screen+Vector2(4,0),0.4)
+	# Render the ground-arrival shader variants behind the existing cover
+	# during menu preparation rather than first creating them on the highway.
+	for index in [1,2,8]:
+		models[index].set_meta("entry_active",true)
+		models[index].set_entry_visibility(0.5)
 	for kind in ["bolt","missile","shock","mine"]:
 		var shot = ProjectileScript.new()
 		menu_showcase.add_child(shot)
@@ -494,13 +576,19 @@ func _finish_menu_preparation() -> void:
 	# already-rendered variants and their cover only prepare combat resources.
 	if is_instance_valid(menu_showcase):
 		for child in menu_showcase.get_children():
+			if child.has_method("set_entry_visibility"):
+				child.set_entry_visibility(1.0)
+				child.set_meta("entry_active",false)
 			if child is Node3D and child.name != "MenuPortrait": child.visible = false
 	menu_prepared = true
-	if start_when_menu_prepared and state == "menu":
+	if start_when_menu_prepared and state == "menu" and (campaign == null or campaign.assets_ready):
 		_start_game_from_ui()
 
 
 func _start_cutting_lab() -> void:
+	if campaign != null: campaign.suspend()
+	if series_scenery != null: series_scenery.force_series(1)
+	training = true
 	start_game()
 	training = true
 	practice = true
@@ -554,6 +642,10 @@ func _start_game_from_ui(reset_mode: bool = true) -> void:
 
 
 func _return_to_menu() -> void:
+	if campaign != null: campaign.suspend()
+	if series_scenery != null: series_scenery.force_series(1)
+	_restore_deployment_clearance()
+	boss_carrier = null
 	_clear_retiring_enemies()
 	if slashing:
 		_consume_strokes()
@@ -571,6 +663,7 @@ func _return_to_menu() -> void:
 	practice = false
 	training = false
 	show_timing = false
+	invincible = false
 	boss_spawned = false
 	boss_enemy = null
 	boss_timer = 2.5
@@ -605,6 +698,7 @@ func _return_to_menu() -> void:
 		menu_showcase = null
 	menu_prepared = true
 	_build_menu_showcase()
+	if campaign != null: campaign.prepare_new_run(false)
 	audio.set_runner_motion(0.0,0.0,false,0.0)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_ui_pointer_capture_until_release = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
@@ -620,7 +714,7 @@ func _on_ui_action(action: StringName, value: Variant) -> void:
 	match action:
 		&"start":
 			if state not in ["menu","dead","won"]: return
-			if state == "menu" and not menu_prepared:
+			if state == "menu" and (not menu_prepared or (campaign != null and not campaign.assets_ready)):
 				start_when_menu_prepared = true
 				_ui_pointer_capture_until_release = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
 			else:
@@ -727,6 +821,7 @@ func _process(delta: float) -> void:
 			gear = 4
 		var world_scale: float = 0.0 if stopped else (SLOW_SCALE if slashing else 1.0)
 		var sim_dt: float = delta * world_scale
+		landing_impact_age += sim_dt
 		effective_runner_speed = 0.0 if training else speed * world_scale
 		audio.set_runner_motion(speed, sim_dt, not training, world_scale)
 		if not training:
@@ -743,9 +838,11 @@ func _process(delta: float) -> void:
 		_update_camera(delta)
 		_update_impact_effects(sim_dt, 0.0 if stopped else delta)
 		_update_blasts(sim_dt)
+		if series_effects != null: series_effects.update(sim_dt)
 		_update_retiring_enemies(sim_dt,world_scale)
 		if not training:
 			_update_road(sim_dt)
+			if series_scenery != null: series_scenery.update(sim_dt,run_distance)
 		if slashing:
 			_consume_strokes()
 		if not training:
@@ -759,9 +856,16 @@ func _process(delta: float) -> void:
 					enemy.set_meta("flythrough_enabled", false)
 					enemy.set_meta("root_motion_velocity", Vector3.ZERO)
 		if victory_timer >= 0.0 and state == "playing":
-			victory_timer -= delta
-			if victory_timer <= 0.0:
-				_finish(true)
+			var staged_death: bool = is_instance_valid(boss_enemy) and boss_enemy.has_meta("boss_death_age")
+			if staged_death:
+				victory_timer = maxf(0.0,BOSS_DEATH_HOLD+BOSS_DEATH_TAIL-float(boss_enemy.get_meta("boss_death_age")))
+			else:
+				victory_timer -= delta
+			if victory_timer <= 0.0 and (not staged_death or bool(boss_enemy.get_meta("boss_death_exploded",false))):
+				if campaign != null and campaign.active:
+					campaign.legacy_boss_finished()
+				else:
+					_finish(true)
 		if guard_remaining > 0.0:
 			sword.set_pose("parry", guard_age / 0.30)
 		elif slashing:
@@ -828,6 +932,12 @@ func _update_camera(delta: float) -> void:
 	camera.rotation = Vector3(aim_angles.y, aim_angles.x, sin(real_clock * 37.0) * shake * 0.015 + sin(stride * 0.5) * body * 0.10)
 	camera.position = Vector3(sin(stride * 0.5) * body * 0.32, 1.75 + cos(stride) * body, 0.0)
 	camera.fov = lerpf(camera.fov, 78.0 + pow(rush, 0.7) * 12.0, 1.0 - exp(-delta * 5.5))
+	if landing_impact_age < 0.85:
+		var t: float = landing_impact_age
+		var envelope: float = exp(-t*5.8)*landing_impact_strength
+		camera.position += Vector3(sin(t*47.0)*0.075,-cos(t*34.0)*0.14,0)*envelope
+		camera.rotation.x += sin(t*39.0)*0.045*envelope
+		camera.rotation.z += sin(t*28.0)*0.025*envelope
 
 
 func _consume_strokes() -> void:
@@ -948,7 +1058,8 @@ func _cut_path(points: PackedVector2Array, continuous: bool) -> void:
 	for enemy in enemies.duplicate():
 		if not is_instance_valid(enemy):
 			continue
-		if enemy.position.z < -32.0 or enemy.position.z > -0.5:
+		if bool(enemy.get_meta("campaign_staging",false)): continue
+		if enemy.position.z < PLAYER_CUT_MIN_Z or enemy.position.z > -0.5:
 			continue
 		# Snapshot this input's visual style only. Last held segments consumed
 		# on release / guard / speed exhaustion still get held-cut feedback.
@@ -964,12 +1075,13 @@ func _cut_path(points: PackedVector2Array, continuous: bool) -> void:
 			enemy.set_meta("last_cut", real_clock)
 			if enemy.dead:
 				enemy.set_meta("dead_time", 0.0)
-	for index in range(projectiles.size() - 1, -1, -1):
-		if index >= projectiles.size():
-			continue
-		var projectile = projectiles[index]
+	# A returned blast can remove several other shots. Keep this gesture's
+	# identities stable rather than iterating indices into a shrinking array.
+	for projectile: Dictionary in projectiles.duplicate():
 		var node: Node3D = projectile.node
-		if camera.is_position_behind(node.global_position) or node.position.z < -32.0:
+		var index := _projectile_index(node)
+		if index < 0: continue
+		if camera.is_position_behind(node.global_position) or node.position.z < PLAYER_CUT_MIN_Z:
 			continue
 		if node.intersects_path(camera, points):
 			_cut_projectile(index)
@@ -1042,7 +1154,7 @@ func _try_guard(source: String = "incoming", enemy: Node3D = null) -> bool:
 
 
 func _hurt(amount: int = 1, source: String = "contact", enemy: Node3D = null) -> void:
-	if state != "playing":
+	if state != "playing" or invincible:
 		return
 	health = maxi(1 if practice else 0, health - amount)
 	combo = 0
@@ -1070,6 +1182,9 @@ func _notice(text: String, duration: float = 1.5) -> void:
 
 
 func _update_spawning(sim_dt: float) -> void:
+	if campaign != null and campaign.active:
+		campaign.update_spawning(sim_dt)
+		return
 	if elapsed >= route_duration:
 		if not boss_spawned:
 			_spawn_boss()
@@ -1085,6 +1200,10 @@ func _update_spawning(sim_dt: float) -> void:
 	if wave_needs_clear and wave_quiet_time < wave_recovery_time:
 		return
 	var plan: Dictionary = EncounterScript.plan(wave_index,elapsed/maxf(route_duration,1.0),speed,route_duration)
+	# Persistent air support must not hold up the authored clear row or the
+	# advanced solo encounters. Retire its shots before admitting either.
+	if str(plan.id) == "four_lane_row" or bool(plan.get("advanced_intro",false)):
+		_retire_sky_enemies()
 	# Most waves keep the continuous v0.9.5 cadence. Only the single authored
 	# row gets a clear stage; ranged additions wait for a readable fire budget.
 	if str(plan.id) == "four_lane_row" and _has_pending_wave_enemies():
@@ -1101,7 +1220,7 @@ func _update_spawning(sim_dt: float) -> void:
 
 func _has_pending_wave_enemies() -> bool:
 	for enemy in enemies:
-		if is_instance_valid(enemy) and not enemy.dead and not enemy.resolved and not bool(enemy.get_meta("encounter_retired",false)):
+		if is_instance_valid(enemy) and not enemy.dead and not enemy.resolved and not enemy.has_meta("sky_lane") and not bool(enemy.get_meta("encounter_retired",false)):
 			return true
 	return false
 
@@ -1133,26 +1252,81 @@ func _spawn_encounter_wave(plan: Dictionary) -> void:
 		enemy.set_meta("encounter_role",str(item.role))
 		enemy.set_meta("wave_attack_delay",float(item.attack_delay))
 		enemy.set_meta("first_charge_extra",float(item.fire_delay))
-	_record_combat("wave",null,{"wave_id":plan.id,"wave_index":wave_index,"count":plan.spawns.size(),"stage":plan.stage})
+		enemy.set_meta("entry_depth_offset",float(item.z_offset))
+		_start_enemy_entry(enemy)
+	var sky_count := 0
+	for item: Dictionary in plan.get("sky_spawns",[]):
+		if not _can_spawn_sky_enemy(str(item.kind),int(item.sky_lane)):
+			_record_combat("sky_spawn_skipped",null,{"wave_index":wave_index,"kind":item.kind,"sky_lane":item.sky_lane})
+			continue
+		var enemy = _spawn_enemy(str(item.kind),LANES.size()+int(item.sky_lane),SKY_ENTRY_Z)
+		if enemy == null: continue
+		enemy.set_meta("wave_id",str(plan.id))
+		enemy.set_meta("encounter_role","sky_support")
+		enemy.position = enemy.get_meta("sky_anchor")
+		_start_enemy_entry(enemy)
+		sky_count += 1
+	_record_combat("wave",null,{"wave_id":plan.id,"wave_index":wave_index,"count":plan.spawns.size()+sky_count,"sky_count":sky_count,"stage":plan.stage})
+
+
+func _can_spawn_sky_enemy(kind: String, sky_lane: int) -> bool:
+	if kind not in FLYING_ENEMIES or kind == "shield_drone" or sky_lane < 0 or sky_lane >= SKY_LANES.size():
+		return false
+	var sky_count := 0
+	var shooters := 0
+	for enemy in enemies:
+		if not is_instance_valid(enemy) or enemy.dead or enemy.resolved or bool(enemy.get_meta("encounter_retired",false)): continue
+		if enemy.has_meta("sky_lane"): sky_count += 1
+		if enemy.enemy_kind in RANGED_ENEMIES and enemy.has_attack_limb():
+			shooters += 1
+			if enemy.enemy_kind in ["interceptor","mine_layer"]: return false
+	return sky_count < MAX_SKY_ENEMIES and shooters < 2
+
+
+func series_kind_info(kind: String) -> Dictionary:
+	var result: Dictionary = SeriesScript.info(kind).duplicate() if SeriesScript.supports(kind) else {"series":1,"label":ENEMY_SERIES_LABEL,"flying":kind in FLYING_ENEMIES}
+	result["series_label"] = str(EncounterScript.get_series_definition(int(result.series)).get("label",ENEMY_SERIES_LABEL))
+	return result
+
+
+func _is_flying_kind(kind: String) -> bool:
+	return bool(SeriesScript.info(kind).get("flying",false)) if SeriesScript.supports(kind) else kind in FLYING_ENEMIES
+
+
+func _ground_root_y(kind: String) -> float:
+	if kind == "cyber_tank": return -0.355
+	return -0.055
 
 
 func _spawn_enemy(kind: String, lane: int, z_position: float) -> Node3D:
+	var sky_lane := lane-LANES.size()
+	if sky_lane >= 0 and (sky_lane >= SKY_LANES.size() or not _is_flying_kind(kind) or kind == "shield_drone"):
+		return null
 	var enemy = EnemyScript.new()
 	enemy_root.add_child(enemy)
 	enemy.configure(kind, lane)
 	var x_position: float = LANES[clampi(lane, 0, 3)]
 	if kind == "tank":
 		x_position += 1.0
-	elif kind in ["boss","barrier","beam"]:
+	elif kind in ["boss","barrier","beam",BOSS_CARRIER_KIND]:
 		x_position = 0.0
 	# The segmented deck's actual top is -0.055m. Grounded voxel soles and
 	# obstacle bases meet that receiver instead of floating above its shadow.
-	var floor_y := 0.0 if kind in FLYING_ENEMIES else -0.055
+	var floor_y := 0.0 if _is_flying_kind(kind) else _ground_root_y(kind)
+	if sky_lane >= 0:
+		x_position = SKY_LANES[sky_lane]
+		floor_y = SKY_ROOT_Y
+		enemy.set_meta("sky_lane",sky_lane)
+		enemy.set_meta("sky_anchor",Vector3(x_position,SKY_ROOT_Y,SKY_HOLD_Z))
+		enemy.fire_timer = 1.0
 	enemy.position = Vector3(x_position, floor_y, z_position)
 	enemy.set_meta("lane_x", x_position)
 	enemy.set_meta("runner_speed", speed)
 	enemy.set_meta("flythrough_enabled", not training)
 	enemy.set_meta("root_motion_velocity", Vector3.ZERO)
+	var series_info: Dictionary = series_kind_info(kind)
+	enemy.set_meta("enemy_series","SERIES_%02d" % int(series_info.get("series",1)))
+	enemy.set_meta("enemy_series_label",str(series_info.get("series_label",ENEMY_SERIES_LABEL)))
 	enemy.severed.connect(_on_enemy_severed)
 	enemy.damaged.connect(_on_enemy_damaged)
 	enemies.append(enemy)
@@ -1161,7 +1335,335 @@ func _spawn_enemy(kind: String, lane: int, z_position: float) -> Node3D:
 	return enemy
 
 
+func _start_enemy_entry(enemy, after_action: String = "run", after_duration: float = 1.0) -> void:
+	if training or enemy.dead: return
+	if SeriesScript.supports(str(enemy.enemy_kind)):
+		series_combat.begin_entry(enemy)
+		return
+	var duration: float = MotionScript.entry_duration(str(enemy.enemy_kind))
+	if bool(enemy.get_meta("deployment_carried",false)): duration = DEPLOYMENT_SECONDS
+	if duration <= 0.0: return
+	var anchor: Vector3 = enemy.position
+	if enemy.has_meta("sky_lane"): anchor = enemy.get_meta("sky_anchor")
+	elif enemy.enemy_kind in FLYING_ENEMIES:
+		anchor.z = -minf(absf(anchor.z),26.0)
+	elif enemy.enemy_kind in ["normal","tank","ranged"]:
+		var depth_offset: float = float(enemy.get_meta("entry_depth_offset",0.0))
+		# Finish the whole pose outside the sword's32m admission plane,
+		# including an8m geometry margin. Run approaches from here afterward.
+		# Formation followers keep their authored longitudinal separation.
+		anchor.z = GROUND_ENTRY_Z+depth_offset
+	if bool(enemy.get_meta("boss_escort",false)) and is_instance_valid(boss_enemy):
+		anchor = Vector3(boss_enemy.get_meta("entry_anchor",boss_enemy.position))+Vector3(float(enemy.get_meta("escort_side",-1))*3.8,0,-1.5)
+		anchor.y = 0.0
+		enemy.set_meta("entry_follow_boss",true)
+	enemy.set_meta("entry_active",true)
+	enemy.set_meta("entry_age",0.0)
+	enemy.set_meta("entry_duration",duration)
+	enemy.set_meta("entry_anchor",anchor)
+	enemy.set_meta("entry_after_action",after_action)
+	enemy.set_meta("entry_after_duration",after_duration)
+	enemy.reset_entry_material_budget()
+	_set_enemy_action(enemy,"entry",duration)
+	_apply_enemy_entry_pose(enemy,0.0)
+	_record_combat("enemy_entry",enemy,{"duration":duration,"sky":enemy.has_meta("sky_lane")})
+
+
+func _apply_enemy_entry_pose(enemy, phase: float) -> void:
+	if bool(enemy.get_meta("deployment_carried",false)):
+		_apply_boss_deployment_pose(enemy,phase)
+		return
+	if enemy.enemy_kind in FLYING_ENEMIES:
+		_apply_flyby_entry_pose(enemy,phase)
+		return
+	var sample: Dictionary = MotionScript.sample_entry(str(enemy.enemy_kind),int(enemy.lane_index),phase)
+	var offset: Vector3 = sample.offset
+	var angles: Vector3 = sample.rotation
+	var anchor: Vector3 = enemy.get_meta("entry_anchor")
+	if bool(enemy.get_meta("entry_follow_boss",false)) and is_instance_valid(boss_enemy):
+		anchor = boss_enemy.position+Vector3(float(enemy.get_meta("escort_side",-1))*3.8,0,-1.5)
+		anchor.y = 0.0
+		enemy.set_meta("entry_anchor",anchor)
+	var inward: float = -signf(anchor.x)
+	var lateral_limit: float = minf(absf(anchor.x)*0.25,0.65)
+	offset.x = inward*minf(absf(offset.x),lateral_limit)
+	angles.y *= inward if not is_zero_approx(inward) else 1.0
+	angles.z *= inward
+	if enemy.enemy_kind not in FLYING_ENEMIES:
+		angles.x = 0.0
+		angles.z = 0.0
+	# Root stays upright at its original ground/sky height. Real rigid poses
+	# carry the lateral/vertical motion, so detached chunks never follow a bank.
+	enemy.position = anchor+Vector3(0,0,offset.z)
+	enemy.set_action("entry",phase)
+	enemy.set_entry_visibility(MotionScript.entry_visibility(str(enemy.enemy_kind),phase))
+	var basis := Basis.from_euler(angles)
+	var pivot := Vector3(0,2.18,0)
+	var entry_pose := Transform3D(basis,Vector3(offset.x,offset.y,0)+pivot-basis*pivot)
+	enemy._rig.transform = entry_pose*enemy._rig.transform
+	if enemy.enemy_kind == "tank" and phase >= 0.38 and not bool(enemy.get_meta("entry_impact_done",false)):
+		enemy.set_meta("entry_impact_done",true)
+		_actor_landing_impact(enemy,0.28)
+	elif enemy.enemy_kind == "normal" and phase >= 0.34 and not bool(enemy.get_meta("entry_impact_done",false)):
+		enemy.set_meta("entry_impact_done",true)
+		audio.play_event("boss_release",0.32)
+
+
+func _apply_flyby_entry_pose(enemy, phase: float) -> void:
+	var p: float = clampf(phase,0.0,1.0)
+	var anchor: Vector3 = enemy.get_meta("entry_anchor")
+	if bool(enemy.get_meta("entry_follow_boss",false)) and is_instance_valid(boss_enemy):
+		anchor = boss_enemy.position+Vector3(float(enemy.get_meta("escort_side",-1))*3.8,0,-1.5)
+		anchor.y = 0.0
+		enemy.set_meta("entry_anchor",anchor)
+	var side: float = signf(anchor.x) if not is_zero_approx(anchor.x) else (-1.0 if int(enemy.lane_index)%2 == 0 else 1.0)
+	var point: Vector3
+	var yaw: float
+	var bank: float
+	if p < 0.48:
+		var u: float = p/0.48
+		point = Vector3(side*3.6,anchor.y,8.0).lerp(Vector3(side*2.2,anchor.y,-12.0),smoothstep(0.0,1.0,u))
+		yaw = PI
+		bank = -side*0.34*sin(u*PI)
+	elif p < 0.82:
+		var u: float = smoothstep(0.0,1.0,(p-0.48)/0.34)
+		point = Vector3(lerpf(side*2.2,anchor.x,u),anchor.y,-12.0-2.0*sin(u*PI))
+		yaw = side*PI*(1.0-u)
+		bank = side*0.62*sin(u*PI)
+	else:
+		var u: float = smoothstep(0.0,1.0,(p-0.82)/0.18)
+		point = Vector3(anchor.x,anchor.y,-12.0).lerp(anchor,u)
+		yaw = 0.0
+		bank = -side*0.06*sin(u*PI)
+	enemy.position = point
+	enemy.set_action("entry",p)
+	var lift: float = 0.45*sin(p*PI)+0.12*sin(p*TAU)
+	var basis := Basis.from_euler(Vector3(-0.08*sin(p*PI),yaw,bank))
+	var pivot := Vector3(0,2.18,0)
+	enemy._rig.transform = Transform3D(basis,Vector3(0,lift,0)+pivot-basis*pivot)*enemy._rig.transform
+	if p >= 0.12 and not bool(enemy.get_meta("flyby_cue_done",false)):
+		enemy.set_meta("flyby_cue_done",true)
+		audio.play_event("flyby",1.0 if enemy.enemy_kind == "interceptor" else 0.8)
+
+
+func _finish_enemy_entry(enemy) -> void:
+	if not bool(enemy.get_meta("entry_active",false)) or enemy.dead: return
+	enemy.set_meta("entry_age",float(enemy.get_meta("entry_duration",1.0)))
+	_apply_enemy_entry_pose(enemy,1.0)
+	enemy.set_meta("entry_age",float(enemy.get_meta("entry_duration",1.0)))
+	enemy.set_meta("entry_active",false)
+	enemy.set_entry_visibility(1.0)
+	enemy.reset_entry_material_budget()
+	var action: String = str(enemy.get_meta("entry_after_action","run"))
+	_set_enemy_action(enemy,action,float(enemy.get_meta("entry_after_duration",1.0)))
+	if action == "run": enemy.set_action("run",fmod(enemy.age*2.2,1.0))
+	_record_combat("enemy_entry_complete",enemy,{"sky":enemy.has_meta("sky_lane")})
+
+
+func _update_enemy_entry(enemy, sim_dt: float) -> void:
+	var before: Vector3 = enemy.position
+	var duration: float = float(enemy.get_meta("entry_duration",1.0))
+	var previous_age: float = float(enemy.get_meta("entry_age",0.0))
+	if bool(enemy.get_meta("deployment_carried",false)) and not _deployment_corridor_open():
+		# Respect actual roof clearance even if a long frame delays the opening.
+		# An early cut releases the clamps at once and holds the fall above the roof.
+		sim_dt = 0.0 if enemy.has_meta("deployment_release_age") else minf(sim_dt,maxf(0.0,DEPLOYMENT_APPROACH_SECONDS-previous_age))
+	var age: float = minf(duration,previous_age+sim_dt)
+	var phase: float = clampf(age/maxf(duration,0.001),0.0,1.0)
+	enemy.set_meta("entry_age",age)
+	enemy.set_meta("action_time",age)
+	enemy.set_meta("action_phase",phase)
+	enemy.set_meta("combat_phase",phase)
+	_apply_enemy_entry_pose(enemy,phase)
+	enemy.pulse_warning(0.0)
+	if phase >= 1.0: _finish_enemy_entry(enemy)
+	enemy.set_meta("root_motion_velocity",(enemy.position-before)/maxf(sim_dt,0.00001))
+
+
+func _release_boss_payload(enemy, release_age: float) -> void:
+	if enemy.has_meta("deployment_release_age") or enemy.dead: return
+	enemy.set_meta("deployment_release_age",release_age)
+	enemy.set_meta("deployment_release_z",enemy.position.z)
+	enemy.set_meta("deployment_release_rig",enemy._rig.transform)
+	enemy.set_meta("deployment_release_phase",0.56*minf(1.0,release_age/DEPLOYMENT_RELEASE_SECONDS))
+	enemy.set_meta("entry_duration",minf(DEPLOYMENT_SECONDS,release_age+DEPLOYMENT_FALL_SECONDS+DEPLOYMENT_SETTLE_SECONDS))
+	if is_instance_valid(boss_carrier):
+		boss_carrier.set_meta("carrier_depart_age",float(boss_carrier.get_meta("carrier_age",0.0)))
+		boss_carrier.set_meta("carrier_depart_origin",boss_carrier.position)
+	audio.play_event("boss_release",1.4)
+	_record_combat("boss_payload_release",enemy,{"early":release_age < DEPLOYMENT_RELEASE_SECONDS})
+
+
+func _apply_boss_deployment_pose(enemy, phase: float) -> void:
+	var age: float = float(enemy.get_meta("entry_age",0.0))
+	var anchor: Vector3 = enemy.get_meta("entry_anchor")
+	var force_end: bool = phase >= 1.0
+	if not enemy.has_meta("deployment_release_age"):
+		var supported: bool = is_instance_valid(boss_carrier) and not boss_carrier.dead
+		if supported:
+			var supports: Dictionary = boss_carrier.get_carrier_hanger_state()
+			supported = bool(supports.connected[0]) and bool(supports.connected[1])
+		if age >= DEPLOYMENT_RELEASE_SECONDS or not supported or force_end:
+			_release_boss_payload(enemy,age)
+	if not enemy.has_meta("deployment_release_age"):
+		enemy.set_action("entry",0.56*age/DEPLOYMENT_RELEASE_SECONDS)
+		var supports: Dictionary = boss_carrier.get_carrier_hanger_state()
+		var mid: Vector3 = (Vector3(supports.world_positions[0])+Vector3(supports.world_positions[1]))*0.5
+		var rig: Transform3D = enemy._rig.transform
+		rig.basis = boss_carrier._rig.basis
+		var mount: Vector3 = rig*DEPLOYMENT_MOUNT_POINT
+		enemy.position = Vector3(anchor.x,anchor.y,mid.z-mount.z)
+		rig.origin += Vector3(mid.x-enemy.position.x-mount.x,mid.y-enemy.position.y-mount.y,0)
+		enemy._rig.transform = rig
+		return
+	var release_age: float = float(enemy.get_meta("deployment_release_age"))
+	var fall: float = clampf((age-release_age)/DEPLOYMENT_FALL_SECONDS,0.0,1.0)
+	if force_end: fall = 1.0
+	var landed: bool = fall >= 1.0
+	var body_phase: float
+	if landed:
+		body_phase = lerpf(0.72,1.0,clampf((age-release_age-DEPLOYMENT_FALL_SECONDS)/DEPLOYMENT_SETTLE_SECONDS,0.0,1.0))
+	else:
+		body_phase = lerpf(float(enemy.get_meta("deployment_release_phase",0.56)),0.72,fall)
+	if force_end: body_phase = 1.0
+	enemy.set_action("entry",body_phase)
+	var released: Transform3D = enemy.get_meta("deployment_release_rig")
+	enemy.position = Vector3(anchor.x,anchor.y,lerpf(float(enemy.get_meta("deployment_release_z")),anchor.z,smoothstep(0.0,1.0,fall)))
+	if not landed:
+		var rig: Transform3D = enemy._rig.transform
+		rig.origin = released.origin.lerp(rig.origin,fall*fall)
+		rig.basis = Basis(released.basis.get_rotation_quaternion().slerp(rig.basis.get_rotation_quaternion(),smoothstep(0.0,1.0,fall)))
+		enemy._rig.transform = rig
+	if landed and not bool(enemy.get_meta("deployment_landed",false)):
+		enemy.set_meta("deployment_landed",true)
+		_actor_landing_impact(enemy,1.0)
+		_record_combat("boss_payload_landed",enemy)
+
+
+func _actor_landing_impact(enemy, intensity: float) -> void:
+	var point := Vector3(enemy.position.x,0.08,enemy.position.z)
+	for side in [-1.0,1.0]:
+		_spawn_blast(point+Vector3(side*(1.1 if intensity >= 1.0 else 0.7),0,0.25),0.85*intensity,false,true)
+	if intensity >= 1.0:
+		_spawn_blast(point+Vector3(0,0.25,0),1.35,true,true)
+		_spawn_impact(point,"launch",1.7)
+	landing_impact_age = 0.0
+	landing_impact_strength = intensity
+	shake = maxf(shake,intensity*0.9)
+	audio.play_event("heavy_land",intensity*1.5)
+
+
+func _begin_deployment_fade(enemy) -> void:
+	enemy.set_meta("deployment_fade_age",0.0)
+	enemy.set_entry_visibility(0.0)
+
+
+func _update_deployment_fade(enemy, sim_dt: float) -> void:
+	if not enemy.has_meta("deployment_fade_age"): return
+	if enemy.dead:
+		enemy.remove_meta("deployment_fade_age")
+		return
+	if sim_dt <= 0.0: return
+	var age: float = minf(DEPLOYMENT_FADE_SECONDS,float(enemy.get_meta("deployment_fade_age"))+sim_dt)
+	if is_equal_approx(age,DEPLOYMENT_FADE_SECONDS):
+		enemy.set_entry_visibility(1.0)
+		enemy.remove_meta("deployment_fade_age")
+	else:
+		enemy.set_meta("deployment_fade_age",age)
+		enemy.set_entry_visibility(smoothstep(0.0,DEPLOYMENT_FADE_SECONDS,age))
+
+
+func _update_carrier_actor(enemy, sim_dt: float) -> void:
+	var before: Vector3 = enemy.position
+	var previous_age: float = float(enemy.get_meta("carrier_age",0.0))
+	if not enemy.dead and not enemy.has_meta("carrier_depart_age") and not _deployment_corridor_open():
+		sim_dt = minf(sim_dt,maxf(0.0,DEPLOYMENT_APPROACH_SECONDS-previous_age))
+	var age: float = previous_age+sim_dt
+	enemy.set_meta("carrier_age",age)
+	if enemy.dead:
+		var plume = enemy.get_node_or_null("CarrierThrust")
+		if is_instance_valid(plume): plume.visible = false
+		var death_age: float = float(enemy.get_meta("carrier_death_age",0.0))+sim_dt
+		enemy.set_meta("carrier_death_age",death_age)
+		enemy.position += Vector3(0,-death_age*2.0,16.0)*sim_dt
+		if death_age > 2.8 or enemy.position.z > 12.0:
+			enemies.erase(enemy)
+			enemy.queue_free()
+			return
+	else:
+		enemy.set_action("carrier",0.0)
+		if not enemy.has_meta("carrier_depart_age") and (not is_instance_valid(boss_enemy) or boss_enemy.dead or not bool(boss_enemy.get_meta("entry_active",false))):
+			enemy.set_meta("carrier_depart_age",age)
+			enemy.set_meta("carrier_depart_origin",enemy.position)
+		if enemy.has_meta("carrier_depart_age"):
+			var depart: float = maxf(0.0,age-float(enemy.get_meta("carrier_depart_age")))
+			var origin: Vector3 = enemy.get_meta("carrier_depart_origin")
+			var u: float = clampf(depart/3.8,0.0,1.0)
+			enemy.position = origin+Vector3(0,12.0*u*u,-280.0*u*u)
+			enemy._rig.transform = Transform3D(Basis.from_euler(Vector3(-0.12*sin(u*PI),0,-0.05*sin(u*PI))),Vector3.ZERO)
+			enemy.set_carrier_release(smoothstep(0.0,0.65,depart))
+			if depart > 4.0:
+				enemies.erase(enemy)
+				enemy.queue_free()
+				return
+		else:
+			var approach := smoothstep(0.0,DEPLOYMENT_APPROACH_SECONDS,age)
+			var descent := smoothstep(DEPLOYMENT_APPROACH_SECONDS,DEPLOYMENT_RELEASE_SECONDS,age)
+			var approach_point := DEPLOYMENT_CARRIER_ENTRY.lerp(DEPLOYMENT_DESCENT_START,approach)
+			enemy.position = approach_point.lerp(Vector3(0,5.3,-16.0),descent)
+			var bank: float = 0.025*sin(age*1.5)*(1.0-descent)
+			enemy._rig.transform = Transform3D(Basis.from_euler(Vector3(0.025*(1.0-descent),0,bank)),Vector3.ZERO)
+		if age >= float(enemy.get_meta("carrier_next_sound",0.0)):
+			audio.play_event("carrier_engine",1.1)
+			enemy.set_meta("carrier_next_sound",age+3.1)
+		_update_carrier_thrust(enemy,age)
+	enemy.set_meta("root_motion_velocity",(enemy.position-before)/maxf(sim_dt,0.00001))
+
+
+func _update_carrier_thrust(enemy, age: float) -> void:
+	var visual = enemy.get_node_or_null("CarrierThrust")
+	if visual == null:
+		visual = MultiMeshInstance3D.new()
+		visual.name = "CarrierThrust"
+		var instances := MultiMesh.new()
+		instances.transform_format = MultiMesh.TRANSFORM_3D
+		instances.use_colors = true
+		var cube := BoxMesh.new()
+		cube.size = Vector3.ONE
+		instances.mesh = cube
+		instances.instance_count = 24
+		visual.multimesh = instances
+		var material := _material(Color.WHITE,true)
+		material.vertex_color_use_as_albedo = true
+		visual.material_override = material
+		visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		enemy.add_child(visual)
+	var fade_age: float = float(enemy.get_meta("deployment_fade_age",DEPLOYMENT_FADE_SECONDS))
+	var visibility: float = smoothstep(0.0,DEPLOYMENT_FADE_SECONDS,fade_age)
+	for engine in range(4):
+		var live: bool = enemy.carrier_lift_intact(engine)
+		var origin := Vector3(-6.55 if engine < 2 else 6.55,1.24,-3.12 if engine%2 == 0 else 3.12)
+		for layer in range(6):
+			var index: int = engine*6+layer
+			if not live:
+				visual.multimesh.set_instance_transform(index,Transform3D(Basis.IDENTITY.scaled(Vector3.ZERO),Vector3.ZERO))
+				continue
+			var pulse: float = 0.88+0.12*sin(age*53.0+float(engine)*1.3+float(layer)*1.7)
+			var width: float = (0.46-float(layer)*0.055)*pulse
+			var point: Vector3 = origin+Vector3(sin(age*21.0+layer)*0.045,-float(layer)*0.27,cos(age*25.0+layer)*0.045)
+			var basis := Basis.IDENTITY.scaled(Vector3(width,0.42*pulse,width)*visibility)
+			visual.multimesh.set_instance_transform(index,enemy._rig.transform*Transform3D(basis,point))
+			visual.multimesh.set_instance_color(index,Color(2.0,1.75,1.15).lerp(Color(1.0,0.27,0.035),float(layer)/5.0)*visibility)
+
+
 func _spawn_boss() -> void:
+	if campaign != null and campaign.active:
+		campaign.begin_boss()
+		return
+	_spawn_legacy_boss()
+
+
+func _spawn_legacy_boss() -> void:
 	if boss_spawned:
 		return
 	victory_timer = -1.0
@@ -1178,25 +1680,44 @@ func _spawn_boss() -> void:
 	boss_support_side = -1
 	boss_enemy = _spawn_enemy("boss", 0, -12.0)
 	boss_timer = 3.2
-	_set_enemy_action(boss_enemy, "recover", 2.1)
+	_prepare_deployment_clearance()
+	boss_carrier = _spawn_enemy(BOSS_CARRIER_KIND,0,-26.0)
+	boss_carrier.position = DEPLOYMENT_CARRIER_ENTRY
+	boss_carrier.set_meta("carrier_age",0.0)
+	boss_carrier.set_meta("carrier_next_sound",0.0)
+	boss_carrier.set_meta("carrier_role",true)
+	boss_enemy.set_meta("deployment_carried",true)
+	_start_enemy_entry(boss_enemy,"recover",0.25)
+	_begin_deployment_fade(boss_carrier)
+	_begin_deployment_fade(boss_enemy)
 	for side in [-1,1]:
 		var escort = _spawn_enemy("shield_drone",0 if side < 0 else 3,-13.5)
 		escort.scale = Vector3.ONE*0.70
-		escort.position.x = float(side)*3.8
+		escort.position = Vector3(float(side)*3.8,0,-13.5)
 		escort.set_meta("lane_x",escort.position.x)
 		escort.set_meta("boss_escort",true)
 		escort.set_meta("escort_side",side)
 		escort.set_meta("escort_window_seen",0)
 		escort.set_meta("encounter_role","boss_escort")
+		_start_enemy_entry(escort)
 	_record_combat("boss_formation",boss_enemy,{"escorts":2})
 	_record_combat("boss_enter", boss_enemy)
 
 
-func _retire_route_enemies(escorts_only: bool = false) -> void:
+func _retire_sky_enemies() -> void:
+	for index in range(projectiles.size()-1,-1,-1):
+		var source = projectiles[index].source
+		if is_instance_valid(source) and source.has_meta("sky_lane"):
+			_remove_projectile(index)
+	_retire_route_enemies(false,true)
+
+
+func _retire_route_enemies(escorts_only: bool = false, sky_only: bool = false) -> void:
 	var order := 0
 	for enemy in enemies.duplicate():
 		if not is_instance_valid(enemy): continue
 		if escorts_only and not bool(enemy.get_meta("boss_escort",false)): continue
+		if sky_only and not enemy.has_meta("sky_lane"): continue
 		if enemy.severed.is_connected(_on_enemy_severed): enemy.severed.disconnect(_on_enemy_severed)
 		if enemy.damaged.is_connected(_on_enemy_damaged): enemy.damaged.disconnect(_on_enemy_damaged)
 		enemy.resolved = true
@@ -1206,7 +1727,7 @@ func _retire_route_enemies(escorts_only: bool = false) -> void:
 		enemy.pulse_warning(1.0)
 		enemies.erase(enemy)
 		retiring_enemies.append({"enemy":enemy,"age":0.0,"delay":float(order)*0.10,"exploded":false,"was_dead":bool(enemy.dead)})
-		_record_combat("encounter_retire",enemy,{"boss_cleanup":escorts_only})
+		_record_combat("encounter_retire",enemy,{"boss_cleanup":escorts_only,"sky_cleanup":sky_only})
 		order += 1
 
 
@@ -1227,7 +1748,9 @@ func _update_retiring_enemies(sim_dt: float, world_scale: float) -> void:
 			var point: Vector3 = enemy.get_aim_point()
 			enemy.retire_for_encounter(camera)
 			if not bool(row.was_dead):
-				_spawn_blast(point,0.65,false)
+				if SeriesScript.supports(str(enemy.enemy_kind)):
+					series_effects.emit_burst(point,int(SeriesScript.info(str(enemy.enemy_kind)).series),0.65,0,false,speed)
+				else: _spawn_blast(point,0.65,false)
 				audio.play_event("explosion",0.40)
 		if float(row.age) >= float(row.delay)+0.45:
 			enemy.queue_free()
@@ -1334,7 +1857,26 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 		enemy.set_meta("aim_target",camera.global_position)
 		enemy.set_meta("flythrough_enabled", not training)
 		var position_before: Vector3 = enemy.position
+		if bool(enemy.get_meta("campaign_staging",false)):
+			enemy.set_meta("simulation_scale",0.0)
+			continue
+		_update_deployment_fade(enemy,sim_dt)
+		if bool(enemy.get_meta("carrier_role",false)):
+			_update_carrier_actor(enemy,sim_dt)
+			continue
 		if enemy.dead:
+			if SeriesScript.supports(str(enemy.enemy_kind)) and bool(enemy.get_meta("campaign_boss_unit",false)):
+				if not bool(enemy.get_meta("series_death_done",false)):
+					series_combat.update_death(enemy,sim_dt)
+				else:
+					enemy.position.z += maxf(18.0,speed)*sim_dt
+					if enemy.position.z > 40.0:
+						enemy.queue_free()
+						enemies.remove_at(index)
+				continue
+			if enemy == boss_enemy and enemy.has_meta("boss_death_age"):
+				_update_boss_death(enemy,sim_dt)
+				continue
 			var dead_time: float = float(enemy.get_meta("dead_time", 0.0)) + sim_dt
 			enemy.set_meta("dead_time", dead_time)
 			if not training:
@@ -1349,12 +1891,21 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 			enemy.set_meta("root_motion_velocity", Vector3.ZERO)
 			continue
 		enemy.age += sim_dt
+		if SeriesScript.supports(str(enemy.enemy_kind)):
+			series_combat.update_actor(enemy,sim_dt,world_scale)
+			continue
+		if bool(enemy.get_meta("entry_active",false)):
+			_update_enemy_entry(enemy,sim_dt)
+			continue
 		if enemy.enemy_kind == "boss":
 			enemy.set_meta("root_motion_velocity", Vector3.ZERO)
 			_update_boss(enemy, sim_dt)
 			continue
 		if bool(enemy.get_meta("boss_escort",false)):
 			_update_boss_escort(enemy,sim_dt)
+			continue
+		if enemy.has_meta("sky_lane"):
+			_update_sky_enemy(enemy,sim_dt)
 			continue
 		if enemy.enemy_kind in ["barrier","beam"]:
 			# Static route fixtures must be cut, rather than parried like attacks.
@@ -1436,18 +1987,7 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 					var fire_duration := 0.50 if enemy.enemy_kind == "interceptor" else (0.30 if enemy.enemy_kind == "mine_layer" else 0.22)
 					_set_enemy_action(enemy, "ranged_fire", fire_duration)
 			"ranged_fire":
-				if enemy.enemy_kind == "interceptor":
-					var shot_index: int = int(enemy.get_meta("burst_shots",0))
-					while shot_index < 3 and phase >= 0.18 + float(shot_index)*0.20:
-						_fire_ranged_payload(enemy,shot_index)
-						shot_index += 1
-						enemy.set_meta("burst_shots",shot_index)
-				elif phase >= 0.25 and not bool(enemy.get_meta("impact_done", false)):
-					enemy.set_meta("impact_done", true)
-					_fire_ranged_payload(enemy)
-				if phase >= 1.0:
-					enemy.fire_timer = 4.2 if enemy.enemy_kind == "shield_drone" else (3.1 if enemy.enemy_kind == "mine_layer" else 2.5)
-					_set_enemy_action(enemy, "run", 1.0)
+				_update_ranged_fire(enemy,phase)
 			"exit":
 				enemy.position.z += (speed * 0.9 + 6.0) * sim_dt
 		var posed_action: String = str(enemy.get_meta("action_state", "run"))
@@ -1464,6 +2004,64 @@ func _update_enemies(sim_dt: float, world_scale: float) -> void:
 		if enemy.position.z > 4.0:
 			enemy.queue_free()
 			enemies.remove_at(index)
+
+
+func _update_ranged_fire(enemy, phase: float) -> void:
+	if enemy.enemy_kind == "interceptor":
+		var shot_index: int = int(enemy.get_meta("burst_shots",0))
+		while shot_index < 3 and phase >= 0.18 + float(shot_index)*0.20:
+			_fire_ranged_payload(enemy,shot_index)
+			shot_index += 1
+			enemy.set_meta("burst_shots",shot_index)
+	elif phase >= 0.25 and not bool(enemy.get_meta("impact_done",false)):
+		enemy.set_meta("impact_done",true)
+		_fire_ranged_payload(enemy)
+	if phase >= 1.0:
+		enemy.fire_timer = 4.2 if enemy.enemy_kind == "shield_drone" else (3.1 if enemy.enemy_kind == "mine_layer" else 2.5)
+		_set_enemy_action(enemy,"run",1.0)
+
+
+func _update_sky_enemy(enemy, sim_dt: float) -> void:
+	var before: Vector3 = enemy.position
+	var action: String = str(enemy.get_meta("action_state","run"))
+	var phase: float = _advance_enemy_action(enemy,sim_dt)
+	if action == "exit":
+		enemy.position += Vector3(0,0,-12.0)*sim_dt
+		if phase >= 1.0:
+			enemies.erase(enemy)
+			enemy.queue_free()
+			return
+	elif not enemy.has_attack_limb():
+		enemy.resolved = true
+		_set_enemy_action(enemy,"exit",1.0)
+		_record_combat("sky_disarmed",enemy)
+	else:
+		var anchor: Vector3 = enemy.get_meta("sky_anchor")
+		enemy.position = anchor
+		match action:
+			"run":
+				enemy.fire_timer -= sim_dt
+				if enemy.fire_timer <= 0.0:
+					_set_enemy_action(enemy,"ranged_charge",_ranged_charge_duration(enemy.enemy_kind))
+					audio.play_event("ranged_charge",0.8)
+					_record_combat("ranged_charge",enemy)
+			"ranged_charge":
+				if phase >= 1.0:
+					var fire_duration := 0.50 if enemy.enemy_kind == "interceptor" else (0.30 if enemy.enemy_kind == "mine_layer" else 0.22)
+					_set_enemy_action(enemy,"ranged_fire",fire_duration)
+			"ranged_fire":
+				_update_ranged_fire(enemy,phase)
+			"stagger", "recover":
+				if phase >= 1.0: _set_enemy_action(enemy,"run",1.0)
+	# The runner moves the scenery; keeping this anchor fixed makes the craft
+	# fly alongside the player at every speed, without a ground melee lunge.
+	var posed_action: String = str(enemy.get_meta("action_state","run"))
+	var posed_phase: float = float(enemy.get_meta("action_phase",0.0))
+	if posed_action == "run": posed_phase = fmod(enemy.age*2.2,1.0)
+	if posed_action == "exit": posed_action = "recover"
+	enemy.set_action(posed_action,posed_phase)
+	enemy.pulse_warning(float(enemy.get_meta("action_phase",0.0)) if posed_action == "ranged_charge" else 0.0)
+	enemy.set_meta("root_motion_velocity",(enemy.position-before)/maxf(sim_dt,0.00001))
 
 
 func _armed_boss_escort(side: int):
@@ -1591,7 +2189,7 @@ func _spawn_projectile(origin: Vector3, kind: String, source: Node3D = null, aim
 	node.configure(kind)
 	# Apply the requested reduction to the entire previous launch speed.
 	# Once launched, the straight projectile keeps this velocity snapshot.
-	var travel_speed := (speed + (38.0 if kind == "bolt" else 30.0)) * PROJECTILE_SPEED_SCALE * speed_multiplier
+	var travel_speed := (speed + (38.0 if kind in ["bolt","needle","buckshot"] else 30.0)) * PROJECTILE_SPEED_SCALE * speed_multiplier
 	var velocity := (Vector3(0.0, 1.65, -0.9) + aim_offset - origin).normalized() * travel_speed
 	node.advance(0.00001, velocity)
 	projectiles.append({"node":node, "velocity":velocity, "kind":kind, "source":source, "reflected":false, "age":0.0})
@@ -1602,58 +2200,219 @@ func _spawn_projectile(origin: Vector3, kind: String, source: Node3D = null, aim
 func _update_projectiles(sim_dt: float) -> void:
 	if sim_dt <= 0.0:
 		return
-	for index in range(projectiles.size() - 1, -1, -1):
-		# A real blast may sever the Boss and synchronously clear all other shots.
-		if index >= projectiles.size():
-			continue
-		var projectile = projectiles[index]
+	_update_series_projectile_behaviors(sim_dt)
+	var remaining := sim_dt
+	var events := 0
+	# Each event removes at least one shot or reflects one hostile shot once.
+	# Recompute after callbacks: Boss death may synchronously clear the array.
+	while not projectiles.is_empty() and events < MAX_PROJECTILE_EVENTS:
+		var event: Dictionary = _next_projectile_event(remaining)
+		if event.is_empty():
+			_advance_projectiles(remaining)
+			remaining = 0.0
+			break
+		var step: float = clampf(float(event.time),0.0,remaining)
+		_advance_projectiles(step)
+		remaining = maxf(0.0,remaining-step)
+		events += 1
+		var projectile: Dictionary = event.projectile
 		var node: Node3D = projectile.node
-		var from := node.global_position
-		var to: Vector3 = from + projectile.velocity * sim_dt
-		projectile.age += sim_dt
-		node.advance(sim_dt, projectile.velocity)
-		if bool(projectile.reflected):
-			var earliest := 2.0
-			var hit_enemy: Node3D = null
-			var hit_point := to
-			for enemy in enemies:
-				if not is_instance_valid(enemy) or enemy.dead:
-					continue
-				var hit: Dictionary = enemy.trace_projectile(from, to, node.collision_radius)
-				if bool(hit.get("hit",false)) and float(hit.fraction) < earliest:
-					earliest = float(hit.fraction)
-					hit_enemy = enemy
-					hit_point = hit.point
-			if is_instance_valid(hit_enemy):
-				_detonate_projectile(index, hit_point, hit_enemy)
-				continue
-		elif to.z >= -0.9:
-			var crossing := clampf((-0.9-from.z)/maxf(to.z-from.z,0.00001),0.0,1.0)
-			node.global_position = from.lerp(to,crossing)
-			var source: Node3D = projectile.source if is_instance_valid(projectile.source) else null
-			if _try_guard("projectile", source):
-				var incoming: Vector3 = projectile.velocity
-				projectile.velocity = -incoming * 1.4
-				projectile.reflected = true
-				node.set_reflected()
-				node.advance(0.00001,projectile.velocity)
-				combat_stats["projectiles_reflected"] = int(combat_stats.get("projectiles_reflected",0))+1
-				_record_combat("projectile_reflected",source,{"projectile_kind":projectile.kind,"reverse_dot":incoming.normalized().dot(projectile.velocity.normalized())})
-				continue
-			_detonate_projectile(index,node.global_position)
-			_hurt(1,"projectile",source)
-			continue
-		node.global_position = to
-		if projectile.age > 9.0 or to.z < -140.0 or to.z > 8.0:
+		var index := _projectile_index(node)
+		if index < 0: continue
+		match str(event.kind):
+			"miss":
+				projectile["player_plane_passed"] = true
+				_record_combat("projectile_passed",projectile.source if is_instance_valid(projectile.source) else null,{"projectile_kind":projectile.kind})
+			"intercept":
+				combat_stats["projectile_interceptions"] = int(combat_stats.get("projectile_interceptions",0))+1
+				var point: Vector3 = node.global_position
+				_record_combat("projectile_interception",null,{"projectile_kind":projectile.kind,"other_kind":event.other.kind,"world_point":[point.x,point.y,point.z]})
+				_detonate_projectile(index,node.global_position)
+			"enemy":
+				_detonate_projectile(index,event.point,event.target)
+			"player":
+				var source: Node3D = projectile.source if is_instance_valid(projectile.source) else null
+				if _try_guard("projectile",source):
+					var incoming: Vector3 = projectile.velocity
+					projectile.velocity = -incoming*1.4
+					projectile.reflected = true
+					node.set_reflected()
+					node.advance(0.00001,projectile.velocity)
+					combat_stats["projectiles_reflected"] = int(combat_stats.get("projectiles_reflected",0))+1
+					_record_combat("projectile_reflected",source,{"projectile_kind":projectile.kind,"reverse_dot":incoming.normalized().dot(projectile.velocity.normalized())})
+				else:
+					var volley: String = str(node.get_meta("volley_id",""))
+					var already_hit: bool = not volley.is_empty() and _volley_damage.has(volley)
+					if not volley.is_empty() and not already_hit: _volley_damage[volley] = game_clock+1.5
+					_detonate_projectile(index,node.global_position)
+					if not already_hit: _hurt(1,"projectile",source)
+	if remaining > 0.0:
+		_advance_projectiles(remaining)
+	for index in range(projectiles.size()-1,-1,-1):
+		var projectile: Dictionary = projectiles[index]
+		var node: Node3D = projectile.node
+		if float(projectile.age) > 9.0 or node.global_position.z < -140.0 or node.global_position.z > 8.0:
 			_remove_projectile(index)
+
+
+func _configure_series_projectile(node: Node3D, behavior: String, options: Dictionary = {}) -> void:
+	var index := _projectile_index(node)
+	if index < 0: return
+	var shot: Dictionary = projectiles[index]
+	shot["series_behavior"] = behavior
+	shot["series_options"] = options.duplicate()
+	shot["launch_velocity"] = Vector3(shot.velocity)
+	shot["series_next"] = float(options.get("delay",options.get("interval",0.55)))
+	shot["series_emitted"] = 0
+	if behavior in ["prime","beacon"]:
+		shot.velocity = Vector3.ZERO
+	elif behavior == "bend":
+		var side := float(options.get("side",signf(node.position.x)))
+		if absf(side) < 0.1: side = 1.0
+		shot.velocity = Vector3(side*2.8,0.35,4.0).normalized()*Vector3(shot.launch_velocity).length()
+	node.set_meta("series_behavior",behavior)
+
+
+func _update_series_projectile_behaviors(_sim_dt: float) -> void:
+	for key in _volley_damage.keys():
+		if float(_volley_damage[key]) <= game_clock: _volley_damage.erase(key)
+	while _volley_damage.size() > 64: _volley_damage.erase(_volley_damage.keys()[0])
+	for shot: Dictionary in projectiles.duplicate():
+		if bool(shot.get("reflected",false)) or not shot.has("series_behavior"): continue
+		var node: Node3D = shot.get("node")
+		if not is_instance_valid(node) or _projectile_index(node)<0: continue
+		var behavior: String = shot.series_behavior
+		var options: Dictionary = shot.get("series_options",{})
+		var age: float = shot.age
+		if age < float(shot.get("series_next",0.0)): continue
+		match behavior:
+			"prime":
+				shot.velocity = Vector3(shot.launch_velocity)
+				shot.erase("series_behavior")
+				audio.play_event("ranged_fire",0.6)
+			"bend":
+				var target: Vector3 = options.get("target",Vector3(0,1.65,-0.9))
+				shot.velocity = (target-node.global_position).normalized()*Vector3(shot.launch_velocity).length()
+				shot.erase("series_behavior")
+			"beacon":
+				var source: Node3D = shot.get("source") if is_instance_valid(shot.get("source")) else null
+				if source == null or source.dead or not source.has_attack_limb():
+					series_effects.emit_burst(node.global_position,3,0.3,1)
+					_remove_projectile(_projectile_index(node))
+					continue
+				if projectiles.size() < MAX_PROJECTILES:
+					_spawn_projectile(node.global_position,"bolt",source)
+					shot.series_emitted = int(shot.series_emitted)+1
+					audio.play_event("ranged_fire",0.65)
+				shot.series_next = age+maxf(0.2,float(options.get("interval",0.55)))
+				if int(shot.series_emitted) >= int(options.get("shots",2)):
+					series_effects.emit_burst(node.global_position,3,0.25,1)
+					_remove_projectile(_projectile_index(node))
+
+
+func _projectile_index(node: Node3D) -> int:
+	for index in range(projectiles.size()):
+		if projectiles[index].node == node: return index
+	return -1
+
+
+func _advance_projectiles(sim_dt: float) -> void:
+	if sim_dt <= 0.0: return
+	for projectile: Dictionary in projectiles:
+		projectile.age = float(projectile.age)+sim_dt
+		var node: Node3D = projectile.node
+		node.global_position += Vector3(projectile.velocity)*sim_dt
+		node.advance(sim_dt,projectile.velocity)
+
+
+func _projectile_pair_time(a: Dictionary, b: Dictionary, sim_dt: float) -> float:
+	# Relative-motion sphere sweep over the SAME time interval. A spatial
+	# intersection of two unrelated paths would also catch near misses in time.
+	var offset: Vector3 = a.node.global_position-b.node.global_position
+	var delta: Vector3 = (Vector3(a.velocity)-Vector3(b.velocity))*sim_dt
+	var radius: float = float(a.node.collision_radius)+float(b.node.collision_radius)
+	var c: float = offset.length_squared()-radius*radius
+	if c <= 0.0: return 0.0
+	var aa: float = delta.length_squared()
+	if aa <= 0.000000000001: return INF
+	var bb: float = offset.dot(delta)
+	var discriminant: float = bb*bb-aa*c
+	if discriminant < 0.0: return INF
+	var fraction: float = (-bb-sqrt(discriminant))/aa
+	return fraction*sim_dt if fraction >= 0.0 and fraction <= 1.0 else INF
+
+
+func _next_projectile_event(sim_dt: float) -> Dictionary:
+	var earliest := sim_dt+1.0
+	var event: Dictionary = {}
+	# Interceptions win an exact tie with a player-plane hit. Both shots share
+	# one timeline, regardless of their order in the projectiles array.
+	for projectile: Dictionary in projectiles:
+		if not bool(projectile.reflected): continue
+		for other: Dictionary in projectiles:
+			if bool(other.reflected): continue
+			var time: float = _projectile_pair_time(projectile,other,sim_dt)
+			if time <= sim_dt and time < earliest:
+				earliest = time
+				event = {"kind":"intercept","time":time,"projectile":projectile,"other":other}
+	for projectile: Dictionary in projectiles:
+		if not bool(projectile.reflected): continue
+		var node: Node3D = projectile.node
+		var from: Vector3 = node.global_position
+		var to: Vector3 = from+Vector3(projectile.velocity)*sim_dt
+		for enemy in enemies:
+			if not is_instance_valid(enemy) or enemy.dead: continue
+			var hit: Dictionary = enemy.trace_projectile(from,to,node.collision_radius)
+			var time: float = float(hit.get("fraction",2.0))*sim_dt
+			if bool(hit.get("hit",false)) and time >= 0.0 and time <= sim_dt and time < earliest-PROJECTILE_EVENT_TIE_EPSILON:
+				earliest = time
+				event = {"kind":"enemy","time":time,"projectile":projectile,"target":enemy,"point":hit.point}
+	for projectile: Dictionary in projectiles:
+		if bool(projectile.reflected) or bool(projectile.get("player_plane_passed",false)): continue
+		var from_z: float = float(projectile.node.global_position.z)
+		var delta_z: float = float(projectile.velocity.z)*sim_dt
+		if from_z+delta_z < -0.90001: continue
+		var time: float = clampf((-0.9-from_z)/maxf(delta_z,0.00001),0.0,1.0)*sim_dt
+		if time <= sim_dt and time < earliest-PROJECTILE_EVENT_TIE_EPSILON:
+			earliest = time
+			var point: Vector3 = projectile.node.global_position+Vector3(projectile.velocity)*time
+			var body_point := Vector2(0,clampf(point.y,0.9,1.65))
+			var reach := 0.31+float(projectile.node.collision_radius)
+			var touches := Vector2(point.x,point.y).distance_squared_to(body_point) <= reach*reach
+			event = {"kind":"player" if touches else "miss","time":time,"projectile":projectile}
+	return event
 
 
 func _detonate_projectile(index: int, point: Vector3, target: Node3D = null) -> void:
 	var projectile: Dictionary = projectiles[index]
-	var kind: String = projectile.kind
-	var reflected: bool = projectile.reflected
-	# Remove before emitting a cut callback: Boss death clears the array.
+	var friendly: bool = bool(projectile.reflected)
+	var payloads: Array[Dictionary] = [{"kind":projectile.kind,"point":point,"target":target,"friendly":friendly,"was_reflected":friendly,"chain_depth":0}]
+	# Claim the entire chain before material callbacks: the first explosion can
+	# kill the Boss, which synchronously clears all still-active projectiles.
 	_remove_projectile(index)
+	var cursor := 0
+	while friendly and cursor < payloads.size() and payloads.size() < MAX_PROJECTILES:
+		var parent: Dictionary = payloads[cursor]
+		cursor += 1
+		var radius: float = float(REFLECTED_BLAST_RADII.get(str(parent.kind),0.90))
+		for other_index in range(projectiles.size()-1,-1,-1):
+			var other: Dictionary = projectiles[other_index]
+			if bool(other.reflected): continue
+			var other_node: Node3D = other.node
+			var reach: float = radius+float(other_node.collision_radius)
+			if Vector3(parent.point).distance_squared_to(other_node.global_position) > reach*reach: continue
+			payloads.append({"kind":other.kind,"point":other_node.global_position,"target":null,"friendly":true,"was_reflected":false,"chain_depth":int(parent.chain_depth)+1})
+			_remove_projectile(other_index)
+			combat_stats["projectile_chain_detonations"] = int(combat_stats.get("projectile_chain_detonations",0))+1
+	for payload: Dictionary in payloads:
+		_apply_projectile_explosion(payload)
+
+
+func _apply_projectile_explosion(payload: Dictionary) -> void:
+	var kind: String = str(payload.kind)
+	var point: Vector3 = payload.point
+	var target: Node3D = payload.target if is_instance_valid(payload.target) else null
+	var reflected: bool = bool(payload.friendly)
 	var strength := 1.35 if kind == "missile" else (1.20 if kind == "mine" else (1.0 if kind == "shock" else 0.75))
 	_spawn_blast(point,strength,reflected)
 	audio.play_event("explosion_reflected" if reflected else "explosion",strength)
@@ -1689,7 +2448,7 @@ func _detonate_projectile(index: int, point: Vector3, target: Node3D = null) -> 
 			hit_stop = maxf(strongest_stop,0.065 if kind in ["missile","mine"] else 0.045)
 			shake = maxf(shake,0.72)
 			_feedback_contact(point,1.0,"blast")
-	_record_combat("projectile_explosion",target,{"projectile_kind":kind,"reflected":reflected,"blast_radius":radius,"hit_target_count":hit_count,"removed_total":removed_total,"world_point":[point.x,point.y,point.z]})
+	_record_combat("projectile_explosion",target,{"projectile_kind":kind,"reflected":reflected,"was_reflected":bool(payload.was_reflected),"chain_reaction":int(payload.chain_depth)>0,"chain_depth":int(payload.chain_depth),"blast_radius":radius,"hit_target_count":hit_count,"removed_total":removed_total,"world_point":[point.x,point.y,point.z]})
 
 
 func _remove_projectile(index: int) -> void:
@@ -1704,7 +2463,7 @@ func _clear_projectiles() -> void:
 	projectiles.clear()
 
 
-func _spawn_blast(point: Vector3, strength: float, reflected_impact: bool = false) -> Node3D:
+func _spawn_blast(point: Vector3, strength: float, reflected_impact: bool = false, stationary: bool = false) -> Node3D:
 	while blasts.size() >= MAX_BLASTS:
 		var oldest: Node3D = blasts.pop_front()
 		if is_instance_valid(oldest):
@@ -1712,7 +2471,7 @@ func _spawn_blast(point: Vector3, strength: float, reflected_impact: bool = fals
 	var blast = BlastScript.new()
 	add_child(blast)
 	blast.global_position = point
-	blast.configure(strength,0.0 if training else speed,reflected_impact)
+	blast.configure(strength,0.0 if training or stationary else speed,reflected_impact)
 	blasts.append(blast)
 	return blast
 
@@ -1796,12 +2555,23 @@ func _update_impact_effects(sim_dt: float, visual_dt: float = -1.0) -> void:
 
 
 func _on_enemy_severed(enemy: Node3D, point: Vector3, removed_count: int) -> void:
+	if enemy.enemy_kind == BOSS_CARRIER_KIND:
+		var plume = enemy.get_node_or_null("CarrierThrust")
+		if is_instance_valid(plume): plume.visible = false
+		_spawn_blast(enemy.get_aim_point(),1.7,true,true)
+		audio.play_event("explosion_reflected",1.2)
+		_feedback_contact(point,1.0,"blast")
+		shake = maxf(shake,0.8)
+		if is_instance_valid(boss_enemy) and not boss_enemy.dead and bool(boss_enemy.get_meta("entry_active",false)):
+			_release_boss_payload(boss_enemy,float(boss_enemy.get_meta("entry_age",0.0)))
+		_record_combat("carrier_destroyed",enemy,{"removed":removed_count})
+		return
 	kills += 1
 	combat_stats["kills"] = kills
 	_record_combat("severed", enemy, {"removed": removed_count})
 	combo += 1
 	score += (150 + mini(removed_count, 100)) * gear
-	hit_stop = 0.10 if enemy.enemy_kind == "boss" else (0.075 if enemy.enemy_kind == "tank" else 0.055)
+	hit_stop = 0.10 if enemy.enemy_kind == "boss" or bool(enemy.get_meta("campaign_boss_unit",false)) else (0.075 if enemy.enemy_kind == "tank" else 0.055)
 	shake = 0.9
 	kill_pulse = 1.0
 	_feedback_contact(point, 1.0, "kill")
@@ -1810,11 +2580,72 @@ func _on_enemy_severed(enemy: Node3D, point: Vector3, removed_count: int) -> voi
 	audio.play_event("kill", 0.8 + float(gear) * 0.15)
 	if show_timing:
 		_notice("关键结构斩断  ×%d" % combo, 0.85)
-	if enemy == boss_enemy:
-		victory_timer = 2.4
+	if bool(enemy.get_meta("campaign_boss_unit",false)) and SeriesScript.supports(str(enemy.enemy_kind)):
+		series_combat.begin_death(enemy)
+		var survivors := false
+		for member in enemies:
+			if is_instance_valid(member) and member != enemy and not member.dead and bool(member.get_meta("campaign_boss_unit",false)):
+				survivors = true
+		if not survivors: _clear_projectiles()
+	elif enemy == boss_enemy:
+		_begin_boss_death(enemy)
 		_clear_projectiles()
 		_retire_route_enemies(true)
-		_notice("核心已断 · 继续斩碎残骸", 2.4)
+		_notice("核心已断 · 失稳爆破", 2.4)
+
+
+func _begin_boss_death(enemy) -> void:
+	if enemy.has_meta("boss_death_age"): return
+	enemy.set_meta("entry_active",false)
+	enemy.set_meta("boss_death_age",0.0)
+	enemy.set_meta("boss_death_anchor",enemy.position)
+	enemy.set_meta("boss_death_rig",enemy._rig.transform)
+	enemy.set_meta("boss_death_hold",true)
+	enemy.set_meta("boss_death_stationary",true)
+	enemy.set_meta("boss_death_exploded",false)
+	enemy.set_meta("boss_death_cracks",0)
+	enemy.set_meta("root_motion_velocity",Vector3.ZERO)
+	victory_timer = BOSS_DEATH_HOLD+BOSS_DEATH_TAIL
+	_record_combat("boss_death_hold",enemy)
+
+
+func _update_boss_death(enemy, sim_dt: float) -> void:
+	var age: float = float(enemy.get_meta("boss_death_age",0.0))+sim_dt
+	var retained_pose: Transform3D = enemy.get_meta("boss_death_rig")
+	enemy.set_meta("boss_death_age",age)
+	enemy.position = enemy.get_meta("boss_death_anchor")
+	enemy.set_meta("root_motion_velocity",Vector3.ZERO)
+	var cracks: int = int(enemy.get_meta("boss_death_cracks",0))
+	while cracks < 2 and age >= 0.42*float(cracks+1):
+		var point: Vector3 = enemy.to_global(retained_pose*Vector3(-1.08 if cracks == 0 else 1.08,3.0,0.45))
+		_spawn_blast(point,0.40,false,true)
+		audio.play_event("explosion",0.45)
+		cracks += 1
+		enemy.set_meta("boss_death_cracks",cracks)
+		_record_combat("boss_death_crack",enemy,{"stage":cracks})
+	if age >= BOSS_DEATH_HOLD and not bool(enemy.get_meta("boss_death_exploded",false)):
+		enemy.set_meta("boss_death_hold",false)
+		enemy.set_meta("boss_death_exploded",true)
+		var count := 0
+		for piece in enemy.get_children():
+			if not piece.get_meta("voxel_piece",false) or piece.is_queued_for_deletion(): continue
+			var radial: Vector3 = piece.position-retained_pose*Vector3(0,2.6,0.2)
+			var direction: Vector3 = radial.normalized() if radial.length_squared() > 0.0001 else Vector3.UP
+			piece.velocity = direction*(7.0+float(count%4)*1.2)+Vector3(0,2.6,1.5)
+			piece.spin = Vector3(float(count%3)-1.0,signf(radial.x)*1.8,signf(radial.x)*2.6)
+			piece.lifetime = maxf(piece.lifetime,piece.elapsed+BOSS_DEATH_TAIL+0.6)
+			count += 1
+		for side in [-1.0,0.0,1.0]:
+			_spawn_blast(enemy.to_global(retained_pose*Vector3(side*1.05,2.6,0.2)),1.9 if side == 0.0 else 1.05,true,true)
+		audio.play_event("explosion_reflected",1.8)
+		shake = maxf(shake,0.9)
+		_record_combat("boss_death_explosion",enemy,{"true_fragments":count})
+	if bool(enemy.get_meta("boss_death_exploded",false)):
+		# A full fragment budget may retain real cells in the original body.
+		# Move that existing rig gently; never replace it with a restored hull.
+		var tail: float = clampf((age-BOSS_DEATH_HOLD)/BOSS_DEATH_TAIL,0.0,1.0)
+		var base: Transform3D = enemy.get_meta("boss_death_rig")
+		enemy._rig.transform = Transform3D(Basis(Vector3.FORWARD,0.09*tail),Vector3(0,-0.22*tail*tail,0.35*tail))*base
 
 
 func _on_enemy_damaged(enemy: Node3D, point: Vector3, removed_count: int) -> void:
@@ -1840,8 +2671,9 @@ func _update_hud() -> void:
 		return
 	var targets: Array = []
 	for enemy in enemies:
-		if not is_instance_valid(enemy) or enemy.dead or enemy.resolved or camera.is_position_behind(enemy.get_aim_point()):
+		if not is_instance_valid(enemy) or enemy.dead or enemy.resolved or bool(enemy.get_meta("campaign_staging",false)) or camera.is_position_behind(enemy.get_aim_point()):
 			continue
+		if enemy.has_meta("deployment_fade_age") and not enemy.visible: continue
 		var time_left: float = maxf(0.0, (-enemy.position.z - 4.5) / (speed + ENEMY_RUN_SPEED))
 		var kind: String = enemy.enemy_kind
 		var action: String = str(enemy.get_meta("action_state", "run"))
@@ -1854,12 +2686,28 @@ func _update_hud() -> void:
 		elif kind == "boss":
 			time_left = maxf(0.0, boss_timer) + 1.3
 		var target_label: String = {"tank":"肉盾 · 二连击","ranged":"射手","boss":"核心守卫","drone":"巡飞机","missile_drone":"双弹舱重机","barrier":"斩断锁梁","beam":"切断斜撑"}.get(kind,"迎面攻击")
+		if kind == BOSS_CARRIER_KIND: target_label = "吊装运兵船 · 可斩"
+		if SeriesScript.supports(kind):
+			target_label = str(SeriesScript.info(kind).label)
+			if action in ["charge","fire","recover","stagger","exit","run","feint"]: time_left = -1.0
+			if bool(enemy.get_series_integrity_state().get("vulnerable",false)): target_label += " · 核心暴露"
+		if show_timing: target_label = str(series_kind_info(kind).get("series_label",ENEMY_SERIES_LABEL))+" · "+target_label
+		var sky: bool = enemy.has_meta("sky_lane")
+		var entering: bool = bool(enemy.get_meta("entry_active",false))
+		var auxiliary_carrier: bool = kind == BOSS_CARRIER_KIND
+		if auxiliary_carrier: time_left = -1.0
+		if sky:
+			time_left = -1.0
+			target_label = "天空 · "+target_label
+		if entering:
+			time_left = -1.0
+			target_label = "入场 · "+target_label
 		if training:
 			time_left = -1.0
 			target_label = "切割靶"
-		if not training and enemy.position.z < -32.0 and time_left > 2.5:
+		if not training and enemy.position.z < PLAYER_CUT_MIN_Z and time_left > 2.5:
 			continue
-		targets.append({"screen": camera.unproject_position(enemy.get_aim_point()), "progress": clampf(1.0 - time_left / 1.8, 0.0, 1.0), "kind": kind, "can_cut": enemy.position.z >= -32.0, "label": target_label, "time_left": time_left, "action": action})
+		targets.append({"screen": camera.unproject_position(enemy.get_aim_point()), "progress": 0.0 if time_left < 0.0 or sky or entering or auxiliary_carrier else clampf(1.0 - time_left / 1.8, 0.0, 1.0), "kind": kind, "can_cut": enemy.position.z >= PLAYER_CUT_MIN_Z, "label": target_label, "time_left": time_left, "action": action})
 	for projectile in projectiles:
 		var projectile_node: Node3D = projectile.node
 		if bool(projectile.reflected) or projectile_node.position.z < -25.0 or camera.is_position_behind(projectile_node.global_position):
@@ -1867,7 +2715,11 @@ func _update_hud() -> void:
 		var impact_time: float = maxf(0.0, (-projectile_node.position.z - 0.9) / maxf(projectile.velocity.z, 0.1))
 		targets.append({"screen": camera.unproject_position(projectile_node.global_position), "progress": clampf(1.0 - impact_time / 1.2, 0.0, 1.0), "kind": "projectile", "can_cut": true, "label": "斩爆 / 反射", "time_left": impact_time})
 	hud.set_snapshot({
-		"menu_ready":menu_prepared,"ui_settings":ui_settings.duplicate(),
+		"menu_ready":menu_prepared and (campaign == null or campaign.assets_ready),"ui_settings":ui_settings.duplicate(),
+		"warm_completed":campaign.warm_completed if campaign != null else 0,"warm_total":campaign.warm_total if campaign != null else 0,
+		"campaign_active":campaign.active if campaign != null else false,"campaign_level":campaign.current_level_index+1 if campaign != null else 1,
+		"series_label":campaign.series_label() if campaign != null and not campaign.run.is_empty() else "第一系列",
+		"campaign_phase":campaign.phase if campaign != null else "menu","run_time":campaign.run_time if campaign != null else elapsed,
 		"state": state, "speed": speed, "gear": gear, "health": health,
 		"score": score, "kills": kills, "combo": combo, "time": elapsed,
 		"duration": route_duration, "slow": slashing, "parry": guard_remaining / 0.30,
@@ -1880,6 +2732,7 @@ func _update_hud() -> void:
 		"slash_energy": slash_energy, "impact_direction": impact_direction, "impact_point": impact_point,
 		"flash": hurt_flash, "message": message if message_timer > 0.0 else "",
 		"boss": boss_spawned, "practice": practice,
+		"invincible": invincible,
 		"training": training, "targets": targets, "cut_serial": cut_serial,
 		"show_timing": show_timing,
 		"touch_mode": touch_mode,
@@ -2162,6 +3015,52 @@ void fragment() {
 	add_child(enemy_root)
 
 
+func _prepare_deployment_clearance() -> void:
+	if not deployment_clearance.is_empty(): return
+	deployment_clearance_age = 0.0
+	# Existing gantry members slide laterally out of the lifting corridor.
+	# Save exact instance transforms so restarting restores the original route.
+	for segment in road_segments:
+		for root in segment.get_meta("section_roots",[]):
+			for visual in root.get_children():
+				if not visual is MultiMeshInstance3D or visual.multimesh == null: continue
+				var mesh: MultiMesh = visual.multimesh
+				for index in range(mesh.instance_count):
+					var original: Transform3D = mesh.get_instance_transform(index)
+					var bounds: AABB = original*AABB(Vector3.ONE*-0.5,Vector3.ONE)
+					if bounds.end.y < 5.4 or bounds.position.x > 9.4 or bounds.end.x < -9.4: continue
+					var side: float = signf(original.origin.x)
+					if absf(original.origin.x) < 1.8: side = -1.0 if index%2 == 0 else 1.0
+					var distance: float = 16.0 if absf(original.origin.x) < 1.8 else 10.0
+					distance = maxf(distance,9.4-bounds.position.x if side > 0.0 else bounds.end.x+9.4)
+					deployment_clearance.append({"mesh":mesh,"index":index,"original":original,"offset":Vector3(side*distance,0,0)})
+	_record_combat("deployment_gantry_open",null,{"members":deployment_clearance.size()})
+
+
+func _deployment_corridor_open() -> bool:
+	return deployment_clearance.is_empty() or deployment_clearance_age >= DEPLOYMENT_OPEN_SECONDS
+
+
+func _update_deployment_clearance(sim_dt: float) -> void:
+	if _deployment_corridor_open(): return
+	# Road updates precede actor updates, so the full reveal frame still has a closed roof.
+	for actor in [boss_enemy,boss_carrier]:
+		if is_instance_valid(actor) and actor.has_meta("deployment_fade_age"): return
+	deployment_clearance_age = minf(DEPLOYMENT_OPEN_SECONDS,deployment_clearance_age+sim_dt)
+	var phase: float = smoothstep(0.0,DEPLOYMENT_OPEN_SECONDS,deployment_clearance_age)
+	for member: Dictionary in deployment_clearance:
+		var transform: Transform3D = member.original
+		transform.origin += Vector3(member.offset)*phase
+		member.mesh.set_instance_transform(int(member.index),transform)
+
+
+func _restore_deployment_clearance() -> void:
+	for member: Dictionary in deployment_clearance:
+		if is_instance_valid(member.mesh): member.mesh.set_instance_transform(int(member.index),member.original)
+	deployment_clearance.clear()
+	deployment_clearance_age = 0.0
+
+
 func _update_road(sim_dt: float) -> void:
 	for segment in road_segments:
 		segment.position.z += speed * sim_dt
@@ -2175,13 +3074,14 @@ func _update_road(sim_dt: float) -> void:
 			_set_route_section(segment,section)
 		if segment.position.z >= 0.0 and segment.position.z < 10.0:
 			route_section = int(segment.get_meta("route_section",0))
+	_update_deployment_clearance(sim_dt)
 	_update_speed_flow()
 
 
 func _set_route_section(segment: Node3D, section: int) -> void:
 	var roots: Array = segment.get_meta("section_roots",[])
 	for index in range(roots.size()):
-		roots[index].visible = index == section
+		roots[index].visible = index == section and int(segment.get_meta("scenery_series_id",1)) == 1
 	segment.set_meta("route_section",section)
 
 

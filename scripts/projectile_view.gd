@@ -13,18 +13,37 @@ var _exhaust: MultiMesh
 var _exhaust_start := -0.4
 var _exhaust_size := 0.08
 var _solid_bounds := AABB()
+var _roll_speed := 0.0
+var _travel_basis := Basis.IDENTITY
+var _exhaust_tint := Color(2.0,1.24,0.48)
+var _exhaust_tail_tint := Color(0.65,0.18,0.025)
+var _visuals: Array[Node3D] = []
 static var _materials: Dictionary = {}
 static var _shell_material: ShaderMaterial
+static var _unit_cube: BoxMesh
+static var _indicator_meshes: Dictionary = {}
 
 
 static func prewarm() -> void:
-	for kind in ["bolt","missile","shock","mine"]:
-		GeometryScript.get_template(kind)
+	for kind in GeometryScript.KINDS:
+		var template: Dictionary = GeometryScript.get_template(kind)
+		_get_indicator_mesh(template.indicator_size)
+		var hot_tint: Color = template.get("signal_tint",Color(1.8,0.74,0.18))
+		_material("hot_"+kind if kind in GeometryScript.NEW_KINDS else "hot",hot_tint,0.0,0.6,true)
 	_get_shell_material()
+	_get_unit_cube()
+	_material("exhaust",Color.WHITE,0.0,0.6,true).vertex_color_use_as_albedo = true
+	_material("reflected",Color(0.48,1.8,1.5),0.0,0.6,true)
 
 
 func configure(kind: String) -> void:
+	for visual in _visuals:
+		if is_instance_valid(visual): visual.free()
+	_visuals.clear()
 	projectile_kind = kind
+	reflected = false
+	age = 0.0
+	_travel_basis = Basis.IDENTITY
 	var template: Dictionary = GeometryScript.get_template(kind)
 	collision_radius = template.radius
 	_solid_bounds = template.bounds
@@ -34,23 +53,27 @@ func configure(kind: String) -> void:
 	shell.material_override = _get_shell_material()
 	shell.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(shell)
-	var hot := _material("hot", Color(1.8, 0.74, 0.18), 0.0, 0.6, true)
+	_visuals.append(shell)
+	var hot_tint: Color = template.get("signal_tint",Color(1.8,0.74,0.18))
+	var hot := _material("hot_"+kind if kind in GeometryScript.NEW_KINDS else "hot",hot_tint,0.0,0.6,true)
 	_signal = _box(template.indicator_size,template.indicator_position,hot)
 	_exhaust_start = template.exhaust_start
 	_exhaust_size = template.exhaust_size
+	_roll_speed = float(template.get("roll_speed",0.0))
+	_exhaust_tint = template.get("exhaust_tint",Color(2.0,1.24,0.48))
+	_exhaust_tail_tint = _exhaust_tint*0.32 if kind in GeometryScript.NEW_KINDS else Color(0.65,0.18,0.025)
 	_exhaust = MultiMesh.new()
 	_exhaust.transform_format = MultiMesh.TRANSFORM_3D
 	_exhaust.use_colors = true
-	var cube := BoxMesh.new()
-	cube.size = Vector3.ONE
-	_exhaust.mesh = cube
-	_exhaust.instance_count = 0 if kind == "mine" else (4 if kind == "missile" else 2)
+	_exhaust.mesh = _get_unit_cube()
+	_exhaust.instance_count = int(template.get("exhaust_count",0 if kind == "mine" else (4 if kind == "missile" else 2)))
 	var jets := MultiMeshInstance3D.new()
 	jets.multimesh = _exhaust
 	jets.material_override = _material("exhaust",Color.WHITE,0.0,0.6,true)
 	jets.material_override.vertex_color_use_as_albedo = true
 	jets.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(jets)
+	_visuals.append(jets)
 
 
 func set_reflected() -> void:
@@ -63,15 +86,26 @@ func advance(sim_dt: float, velocity: Vector3) -> void:
 	if sim_dt <= 0.0:
 		return
 	age += sim_dt
-	if velocity.length_squared() > 0.0001:
-		var direction := velocity.normalized()
-		var up := Vector3.FORWARD if absf(direction.dot(Vector3.UP)) > 0.98 else Vector3.UP
-		basis = Basis.looking_at(direction, up, true)
+	advance_orientation(velocity)
 	for index in range(_exhaust.instance_count):
 		var size := _exhaust_size*(1.0-float(index)*0.19)*(0.88+sin(age*47.0+index*1.7)*0.12)
 		var transform := Transform3D(Basis.IDENTITY.scaled(Vector3(size,size,size*0.85)),Vector3(0,0,_exhaust_start-float(index)*_exhaust_size*1.1))
 		_exhaust.set_instance_transform(index,transform)
-		_exhaust.set_instance_color(index,Color(2.0,1.24,0.48).lerp(Color(0.65,0.18,0.025),float(index)*0.24))
+		_exhaust.set_instance_color(index,_exhaust_tint.lerp(_exhaust_tail_tint,float(index)*0.24))
+
+
+func advance_orientation(velocity: Vector3) -> void:
+	if velocity.length_squared() > 0.0001:
+		var direction := velocity.normalized()
+		var up := Vector3.FORWARD if absf(direction.dot(Vector3.UP)) > 0.98 else Vector3.UP
+		basis = Basis.looking_at(direction, up, true)
+		_travel_basis = basis
+	elif projectile_kind in GeometryScript.NEW_KINDS:
+		basis = _travel_basis
+	else:
+		return
+	var roll := float(get_meta("roll",0.0))+age*_roll_speed
+	if not is_zero_approx(roll): basis = basis*Basis(Vector3.BACK,roll)
 
 
 func intersects_path(camera: Camera3D, points: PackedVector2Array) -> bool:
@@ -113,14 +147,29 @@ func intersects_path(camera: Camera3D, points: PackedVector2Array) -> bool:
 
 func _box(size: Vector3, at: Vector3, material: Material) -> MeshInstance3D:
 	var visual := MeshInstance3D.new()
-	var mesh := BoxMesh.new()
-	mesh.size = size
+	var mesh := _get_indicator_mesh(size)
 	visual.mesh = mesh
 	visual.position = at
 	visual.material_override = material
 	visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(visual)
+	_visuals.append(visual)
 	return visual
+
+
+static func _get_indicator_mesh(size: Vector3) -> BoxMesh:
+	if not _indicator_meshes.has(size):
+		var fresh := BoxMesh.new()
+		fresh.size = size
+		_indicator_meshes[size] = fresh
+	return _indicator_meshes[size]
+
+
+static func _get_unit_cube() -> BoxMesh:
+	if _unit_cube == null:
+		_unit_cube = BoxMesh.new()
+		_unit_cube.size = Vector3.ONE
+	return _unit_cube
 
 
 static func _get_shell_material() -> ShaderMaterial:

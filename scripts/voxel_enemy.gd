@@ -7,6 +7,10 @@ signal damaged(enemy: Node3D, world_point: Vector3, removed_count: int)
 const DebrisScript = preload("res://scripts/voxel_debris.gd")
 const MotionScript = preload("res://scripts/enemy_motion.gd")
 const ArchetypesScript = preload("res://scripts/enemy_archetypes.gd")
+const CarrierScript = preload("res://scripts/carrier_archetype.gd")
+const SeriesScript = preload("res://scripts/series_archetypes.gd")
+const SERIES_ID := "SERIES_01"
+const SERIES_LABEL := "第一系列"
 const PART_COUNT := 10
 const FULL_MESH_MASK := (1 << PART_COUNT)-1
 const HEAD_TAG := 1
@@ -14,6 +18,7 @@ const CORE_TAG := 2
 const ANCHOR_TAG := 4
 const BOSS_LEFT_REACTOR_TAG := 8
 const BOSS_RIGHT_REACTOR_TAG := 16
+const ENTRY_MATERIAL_DIVISOR := 4
 const BOSS_REACTOR_POINTS: Array[Vector3] = [Vector3(-1.08,3.04,-0.65),Vector3(1.08,3.04,-0.65)]
 const DIRECTIONS: Array[Vector3i] = [
 	Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
@@ -27,6 +32,11 @@ const PALETTE: Array[Color] = [
 ]
 static var _body_templates: Dictionary = {}
 static var _shared_body_shader: Shader
+static var _shared_entry_body_shader: Shader
+static var _shared_entry_prop_shaders: Dictionary = {}
+static var _prop_box_meshes: Dictionary = {}
+static var _prop_sphere_meshes: Dictionary = {}
+static var _shared_slasher_blade: ArrayMesh
 
 var enemy_kind := "normal"
 var resolved := false
@@ -44,16 +54,21 @@ var _dimensions := Vector3i(15, 27, 8)
 var _cell := 0.1
 var _voxels := PackedByteArray()
 var _tags := PackedByteArray()
+var _series_authored_parts := PackedByteArray()
+var _series_integrity: Dictionary = {}
+var _series_palette: Array[Color] = []
 var _live_indices := PackedInt32Array()
 var _part_ids := PackedByteArray()
 var _cell_points := PackedVector3Array()
 var _fine_neighbors := PackedInt32Array()
 var _initial_meshes: Array = []
+var _initial_mesh_cell_counts := PackedInt32Array()
 var _mesh_cell_counts := PackedInt32Array()
 var _mesh_slice_indices: Array[Dictionary] = []
 var _mesh_slice_arrays: Array[Dictionary] = []
 var _mesh_dirty_slices: Array[Dictionary] = []
 var _mesh_slice_ready := false
+var _mesh_shared_slice_mask := 0
 var _mesh_full_dirty_mask := 0
 var _last_rebuilt_slices := 0
 var _last_reused_slices := 0
@@ -99,6 +114,14 @@ var _ranged_left_hold := Vector3.ZERO
 var _ranged_right_hold := Vector3.ZERO
 var _boss_reactor_connected: Array[bool] = [true,true]
 var _boss_sensor_connected := true
+var _carrier_hangers_connected: Array[bool] = [true,true]
+var _entry_material_remainder: int = 0
+var _entry_visibility_active: bool = false
+var _entry_visibility_owner_visible: bool = true
+var _entry_visibility_body_shader: Shader
+var _entry_visibility_bindings: Array[Dictionary] = []
+var _entry_visibility_props: Array[Dictionary] = []
+var _entry_visibility_fragment_material: Material
 
 
 static func prewarm_normal_model() -> void:
@@ -138,8 +161,10 @@ static func _model_template_key(kind: String, variant: int) -> String:
 
 
 func configure(kind: String, lane: int = 0, variant: int = -1) -> void:
+	_restore_entry_visibility()
 	_hand_cache.clear()
 	_emitter_cache.clear()
+	_entry_material_remainder = 0
 	_ranged_hold_initialized = false
 	_ranged_seen_front_target = false
 	_ranged_last_pose_age = 0.0
@@ -148,6 +173,16 @@ func configure(kind: String, lane: int = 0, variant: int = -1) -> void:
 		if child.get_meta("voxel_piece", false) or child.get_meta("cut_chip", false) or child.get_meta("cut_particle_batch", false):
 			child.queue_free()
 	enemy_kind = kind
+	set_meta("enemy_series",SERIES_ID)
+	set_meta("enemy_series_label",SERIES_LABEL)
+	_series_integrity = {}
+	for key in ["series_attack_variant","series_feint","series_shield_open","series_burrow","series_entry_authored","series_pose_from_rig","series_pose_from_parts","series_pose_handoff_started"]:
+		if has_meta(key): remove_meta(key)
+	_series_palette = SeriesScript.palette(kind) if SeriesScript.supports(kind) else PALETTE
+	if SeriesScript.supports(kind):
+		var metadata: Dictionary = SeriesScript.info(kind)
+		set_meta("enemy_series","SERIES_%02d" % int(metadata.series))
+		set_meta("enemy_series_label",["","","第二系列","第三系列","第四系列","第五系列"][int(metadata.series)])
 	lane_index = lane
 	# Variants do not draw from the encounter RNG. Normal two-argument spawns
 	# select all three silhouettes through their lane; explicit previews can
@@ -168,28 +203,34 @@ func configure(kind: String, lane: int = 0, variant: int = -1) -> void:
 	var template_key := _model_template_key(kind,construct_variant)
 	var cached := _body_templates.has(template_key)
 	_initial_meshes.clear()
+	_initial_mesh_cell_counts = PackedInt32Array()
 	_next_mesh_mask = FULL_MESH_MASK
 	_mesh_slice_indices = []
 	_mesh_slice_arrays = []
 	_mesh_dirty_slices = []
 	_mesh_slice_ready = false
+	_mesh_shared_slice_mask = 0
 	_mesh_full_dirty_mask = 0
 	if cached:
 		var template: Dictionary = _body_templates[template_key]
-		# Packed occupancy and tags remain private to each actor. Initial meshes
-		# are immutable resources; a real cut replaces only that actor's mesh.
+		# Only occupancy and the compacted live list are writable per actor.
+		# Authored tags, poses, neighbours and columns are never changed by cuts.
 		_voxels = template.voxels.duplicate()
-		_tags = template.tags.duplicate()
+		_tags = template.tags
 		_live_indices = template.live.duplicate()
-		_part_ids = template.parts.duplicate()
-		_cell_points = template.points.duplicate()
-		_fine_neighbors = template.neighbors.duplicate()
-		_depth_columns = template.get("columns",{}).duplicate()
+		_part_ids = template.parts
+		_cell_points = template.points
+		_fine_neighbors = template.neighbors
+		_depth_columns = template.get("columns",{})
 		_core_point = template.core
 		_initial_meshes = template.meshes.duplicate()
+		_initial_mesh_cell_counts = template.mesh_cell_counts
 		if template.has("slice_indices"):
-			_mesh_slice_indices = _copy_slice_dictionaries(template.slice_indices)
-			_mesh_slice_arrays = _copy_slice_dictionaries(template.slice_arrays)
+			_mesh_slice_indices = template.slice_indices
+			# The outer list is private; each immutable template map is copied
+			# only when this actor first changes that part's visible planes.
+			_mesh_slice_arrays = template.slice_arrays.duplicate()
+			_mesh_shared_slice_mask = FULL_MESH_MASK
 			for part in range(PART_COUNT): _mesh_dirty_slices.append({})
 			_mesh_slice_ready = true
 	else:
@@ -204,10 +245,24 @@ func configure(kind: String, lane: int = 0, variant: int = -1) -> void:
 		_body_templates[template_key] = _make_template(meshes)
 	_build_reactor_marker()
 	_configured = true
+	if SeriesScript.supports(kind): _series_integrity = _body_templates[template_key].series_integrity.duplicate(true)
+	if kind == "boss_carrier":
+		var template: Dictionary = _body_templates[template_key]
+		_carrier_hangers_connected = template.carrier_hangers.duplicate()
 	set_action("run", 0.0)
 
 
 func _set_model_dimensions(kind: String) -> void:
+	if SeriesScript.supports(kind):
+		var layout: Dictionary = SeriesScript.dimensions(kind)
+		_dimensions = layout.dimensions
+		_cell = float(layout.cell)
+		return
+	if kind == "boss_carrier":
+		var layout: Dictionary = CarrierScript.dimensions()
+		_dimensions = layout.dimensions
+		_cell = float(layout.cell)
+		return
 	if ArchetypesScript.supports(kind):
 		var layout: Dictionary = ArchetypesScript.dimensions(kind)
 		_dimensions = layout.dimensions
@@ -244,26 +299,38 @@ func _set_model_dimensions(kind: String) -> void:
 
 
 func _build_voxel_data() -> void:
+	_series_palette = SeriesScript.palette(enemy_kind) if SeriesScript.supports(enemy_kind) else PALETTE
+	# Reconfiguration may follow a cached model. Rebind authored data before
+	# building instead of writing through references held by the template.
+	_voxels = PackedByteArray()
+	_tags = PackedByteArray()
+	_live_indices = PackedInt32Array()
+	_part_ids = PackedByteArray()
+	_cell_points = PackedVector3Array()
+	_fine_neighbors = PackedInt32Array()
+	_depth_columns = {}
 	_voxels.resize(_dimensions.x * _dimensions.y * _dimensions.z)
 	_voxels.fill(0)
 	_tags.resize(_voxels.size())
 	_tags.fill(0)
 	_build_robot()
-	_live_indices.clear()
-	_fine_neighbors.clear()
-	_depth_columns.clear()
-	_part_ids.resize(_voxels.size())
+	var new_series: bool = SeriesScript.supports(enemy_kind)
+	var fine_grid := _uses_fine_grid()
+	var armored_series: bool = new_series and bool(SeriesScript.info(enemy_kind).armored)
+	if new_series: _part_ids = _series_authored_parts
+	else: _part_ids.resize(_voxels.size())
 	_cell_points.resize(_voxels.size())
 	for index in range(_voxels.size()):
-		if _uses_fine_grid() and _voxels[index] == 0:
+		if fine_grid and _voxels[index] == 0:
 			continue
-		_part_ids[index] = _classify_part_index(index)
+		if not new_series: _part_ids[index] = _classify_part_index(index)
 		var coordinate := _coords(index)
 		_cell_points[index] = _point(coordinate.x, coordinate.y, coordinate.z)
 		if _voxels[index] != 0:
 			_live_indices.append(index)
-			if enemy_kind in ["tank","boss","shield_drone"]:
+			if enemy_kind in ["tank","boss","shield_drone","boss_carrier"] or armored_series:
 				var key := coordinate.x+coordinate.y*_dimensions.x
+				if enemy_kind == "boss_carrier" or new_series: key += int(_part_ids[index])*_dimensions.x*_dimensions.y
 				if not _depth_columns.has(key): _depth_columns[key] = PackedInt32Array()
 				_depth_columns[key].append(index)
 	if _uses_fine_grid():
@@ -271,10 +338,11 @@ func _build_voxel_data() -> void:
 
 
 func _uses_fine_grid() -> bool:
-	return ArchetypesScript.supports(enemy_kind) or enemy_kind in ["normal", "tank", "ranged", "boss", "drone", "missile_drone", "barrier", "beam"]
+	return SeriesScript.supports(enemy_kind) or ArchetypesScript.supports(enemy_kind) or enemy_kind in ["normal", "tank", "ranged", "boss", "drone", "missile_drone", "barrier", "beam", "boss_carrier"]
 
 
 func _is_flying() -> bool:
+	if SeriesScript.supports(enemy_kind): return bool(SeriesScript.info(enemy_kind).flying)
 	return ArchetypesScript.supports(enemy_kind) or enemy_kind in ["drone", "missile_drone"]
 
 
@@ -284,10 +352,22 @@ func _is_construct() -> bool:
 
 func _make_template(meshes: Array) -> Dictionary:
 	if not _mesh_slice_ready and _uses_fine_grid(): _seed_mesh_slices(meshes)
-	var result := {"voxels":_voxels.duplicate(), "tags":_tags.duplicate(), "live":_live_indices.duplicate(), "parts":_part_ids.duplicate(), "points":_cell_points.duplicate(), "neighbors":_fine_neighbors.duplicate(), "columns":_depth_columns.duplicate(), "core":_core_point, "meshes":meshes}
+	var counts := PackedInt32Array()
+	counts.resize(PART_COUNT)
+	for index in _live_indices: counts[_part_ids[index]] += 1
+	var result := {"voxels":_voxels.duplicate(), "tags":_tags, "live":_live_indices.duplicate(), "parts":_part_ids, "points":_cell_points, "neighbors":_fine_neighbors, "columns":_depth_columns, "core":_core_point, "meshes":meshes, "mesh_cell_counts":counts}
 	if _mesh_slice_ready:
-		result["slice_indices"] = _copy_slice_dictionaries(_mesh_slice_indices)
-		result["slice_arrays"] = _copy_slice_dictionaries(_mesh_slice_arrays)
+		result["slice_indices"] = _mesh_slice_indices
+		result["slice_arrays"] = _mesh_slice_arrays.duplicate()
+		_mesh_shared_slice_mask = FULL_MESH_MASK
+	if enemy_kind == "boss_carrier":
+		# This is the intact authored topology only. Every real material commit
+		# still recomputes its full groups and current load-bearing frame.
+		_refresh_carrier_hangers(_connected_components())
+		result["carrier_hangers"] = _carrier_hangers_connected.duplicate()
+	if SeriesScript.supports(enemy_kind):
+		_refresh_series_integrity(_connected_components())
+		result["series_integrity"] = _series_integrity.duplicate(true)
 	return result
 
 
@@ -313,6 +393,61 @@ func get_boss_reactor_state() -> Dictionary:
 	return {"total":2,"connected":connected,"active":_boss_reactor_connected.duplicate(),"world_positions":positions,"sensor_connected":_boss_sensor_connected}
 
 
+func _refresh_carrier_hangers(groups: Array[Dictionary]) -> int:
+	_carrier_hangers_connected = [false,false]
+	var primary := -1
+	var largest := 0
+	var frame_tags: int = CORE_TAG|HEAD_TAG|ANCHOR_TAG
+	for group_index in range(groups.size()):
+		var group: Dictionary = groups[group_index]
+		var flags: int = int(group.flags)
+		# Only the retained load frame can support the payload. A torn-away
+		# lug carrying a few ANCHOR cells becomes real debris in this commit.
+		if (flags & frame_tags) != frame_tags: continue
+		var count: int = group.indices.size()
+		if count > largest:
+			primary = group_index
+			largest = count
+	# Several cut groups can contain different cells of every frame tag.
+	# Use exactly the one body group commit retains, never merge their flags.
+	if primary >= 0:
+		var flags: int = int(groups[primary].flags)
+		for index in range(2):
+			if flags & int(CarrierScript.HANGER_TAGS[index]): _carrier_hangers_connected[index] = true
+	return primary
+
+
+func get_carrier_hanger_state() -> Dictionary:
+	var points: Array[Vector3] = []
+	for index in range(2):
+		points.append(to_global(_part_pose(8+index)*CarrierScript.HANGER_POINTS[index]))
+	return {"connected":_carrier_hangers_connected.duplicate(),"world_positions":points}
+
+
+func set_carrier_release(open_fraction: float) -> void:
+	if enemy_kind != "boss_carrier" or dead: return
+	for index in range(2):
+		var side: float = -1.0 if index == 0 else 1.0
+		var pivot: Vector3 = CarrierScript.HANGER_PIVOTS[index]
+		var basis := Basis(Vector3.FORWARD,side*0.75*clampf(open_fraction,0.0,1.0))
+		_parts[8+index].transform = Transform3D(basis,pivot-basis*pivot)
+
+
+func carrier_lift_intact(engine_index: int) -> bool:
+	if enemy_kind != "boss_carrier" or dead or engine_index < 0 or engine_index > 3: return false
+	var cache_key := 100+engine_index
+	if _emitter_cache.has(cache_key): return bool(_emitter_cache[cache_key])
+	var center := Vector3(-6.55 if engine_index < 2 else 6.55,2.44,-3.12 if engine_index%2 == 0 else 3.12)
+	var bounds: Array[Vector3i] = _slasher_grid_bounds(center-Vector3(0.48,0.10,0.48),center+Vector3(0.48,0.10,0.48))
+	var intact := false
+	for y in range(bounds[0].y,bounds[1].y+1):
+		for z in range(bounds[0].z,bounds[1].z+1):
+			for x in range(bounds[0].x,bounds[1].x+1):
+				if _voxels[_index(x,y,z)] == 10: intact = true
+	_emitter_cache[cache_key] = intact
+	return intact
+
+
 func _refresh_boss_reactors(groups: Array[Dictionary]) -> void:
 	_boss_reactor_connected = [false,false]
 	_boss_sensor_connected = false
@@ -324,6 +459,68 @@ func _refresh_boss_reactors(groups: Array[Dictionary]) -> void:
 			if flags & HEAD_TAG: _boss_sensor_connected = true
 	if _material is ShaderMaterial:
 		_material.set_shader_parameter("boss_reactor_power",Vector2(1.0 if _boss_reactor_connected[0] else 0.0,1.0 if _boss_reactor_connected[1] else 0.0))
+
+
+func _refresh_series_integrity(groups: Array[Dictionary]) -> void:
+	var layout: Dictionary = SeriesScript.integrity_layout(enemy_kind)
+	var series_boss := enemy_kind in SeriesScript.BOSSES
+	var supports: Array = layout.get("supports",[])
+	var active: Array[bool] = []
+	var flags := 0
+	var powered := 0
+	var remote_parts: Dictionary = {}
+	var loaded: Array[bool] = []
+	loaded.resize(supports.size())
+	loaded.fill(false)
+	for i in range(supports.size()):
+		if supports[i].has("load_bounds"): remote_parts[int(supports[i].part)] = i
+	for group: Dictionary in groups:
+		if not (int(group.flags)&CORE_TAG and int(group.flags)&ANCHOR_TAG): continue
+		if series_boss:
+			var group_power := SeriesScript.powered_boss_modules(int(group.flags))
+			if group_power == 0: continue
+			powered |= group_power
+		flags |= int(group.flags)
+		# Visible neck labels are not health. For load-bearing vehicle necks,
+		# the remote real assembly must itself remain in the core's component.
+		# Removing a painted label while a genuine bypass survives cannot open armor.
+		if not remote_parts.is_empty():
+			for index: int in group.indices:
+				var part := int(_part_ids[index])
+				if not remote_parts.has(part): continue
+				var support: int = remote_parts[part]
+				if not loaded[support] and AABB(supports[support].load_bounds).has_point(_cell_points[index]): loaded[support] = true
+	for i in range(supports.size()): active.append(loaded[i] if supports[i].has("load_bounds") else (flags&(8<<i)) != 0)
+	var count := active.count(true)
+	_series_integrity = {"vulnerable":not supports.is_empty() and count < supports.size(),"active_supports":count,"total_supports":supports.size(),"name":layout.get("name","真实结构"),"support_active":active,"relay_intact":active[0] if enemy_kind == "cyber_captain" and not active.is_empty() else true}
+	if series_boss: _series_integrity["powered_modules"] = powered
+
+
+func get_series_integrity_state() -> Dictionary:
+	if not SeriesScript.supports(enemy_kind): return {}
+	var result := _series_integrity.duplicate(true)
+	var layout: Dictionary = SeriesScript.integrity_layout(enemy_kind)
+	var points: Array[Vector3] = []
+	for item: Dictionary in layout.get("supports",[]):
+		points.append(to_global(_part_pose(int(item.get("part",0)))*Vector3(item.point)))
+	result["core_world"] = to_global(_part_pose(0)*_core_point)
+	result["world_points"] = points
+	if result.has("powered_modules"):
+		var powered: int = result.powered_modules
+		var module_points: Array[Vector3] = []
+		var module_active: Array[bool] = []
+		var modules := SeriesScript.boss_modules(enemy_kind)
+		var pose := global_transform * _part_pose(0)
+		for i in range(modules.size()):
+			module_points.append(pose * Vector3(modules[i].core))
+			module_active.append(not dead and powered & (1 << i) != 0)
+		result["core_world_points"] = module_points
+		result["core_active"] = module_active
+	return result
+
+
+func _body_palette() -> Array[Color]:
+	return _series_palette if not _series_palette.is_empty() else PALETTE
 
 
 func get_screen_bounds(camera: Camera3D) -> Rect2:
@@ -360,6 +557,10 @@ func set_action_variant(index: int) -> void:
 
 
 func get_muzzle_point() -> Vector3:
+	if SeriesScript.supports(enemy_kind):
+		var emitters: Array[Dictionary] = SeriesScript.emitters(enemy_kind)
+		if emitters.is_empty(): return get_aim_point()
+		return to_global(_part_pose(int(emitters[0].part))*Vector3(emitters[0].point))
 	if ArchetypesScript.supports(enemy_kind):
 		var emitters: Array[Dictionary] = ArchetypesScript.emitters(enemy_kind)
 		var emitter: Dictionary = emitters[0]
@@ -376,7 +577,11 @@ func get_ranged_origins() -> Array[Vector3]:
 	var origins: Array[Vector3] = []
 	if dead or not _configured:
 		return origins
-	if ArchetypesScript.supports(enemy_kind):
+	if SeriesScript.supports(enemy_kind):
+		for emitter: Dictionary in SeriesScript.emitters(enemy_kind):
+			if _emitter_intact(int(emitter.part)):
+				origins.append(to_global(_part_pose(int(emitter.part))*Vector3(emitter.point)))
+	elif ArchetypesScript.supports(enemy_kind):
 		for emitter: Dictionary in ArchetypesScript.emitters(enemy_kind):
 			if _emitter_intact(int(emitter.part)):
 				origins.append(to_global(_part_pose(int(emitter.part))*Vector3(emitter.point)))
@@ -399,6 +604,13 @@ func get_ranged_origins() -> Array[Vector3]:
 func has_attack_limb(variant: int = -1) -> bool:
 	if dead or not _configured:
 		return false
+	if enemy_kind == "boss_carrier": return false
+	if SeriesScript.supports(enemy_kind):
+		for emitter: Dictionary in SeriesScript.emitters(enemy_kind):
+			if _emitter_intact(int(emitter.part)): return true
+		for weapon: Dictionary in SeriesScript.integrity_layout(enemy_kind).get("melee_segments",[]):
+			if has_series_melee_weapon(int(weapon.part)): return true
+		return false
 	if ArchetypesScript.supports(enemy_kind):
 		for emitter: Dictionary in ArchetypesScript.emitters(enemy_kind):
 			if _emitter_intact(int(emitter.part)): return true
@@ -419,6 +631,33 @@ func has_attack_limb(variant: int = -1) -> bool:
 			return _hand_intact(2)
 
 
+func has_series_part(part: int) -> bool:
+	return not dead and SeriesScript.supports(enemy_kind) and part >= 0 and part < PART_COUNT and _mesh_cell_counts.size() == PART_COUNT and _mesh_cell_counts[part] > 0
+
+
+func has_series_melee_weapon(part: int) -> bool:
+	if dead or not _configured or not SeriesScript.supports(enemy_kind): return false
+	var key := "melee_%d" % part
+	if _emitter_cache.has(key): return bool(_emitter_cache[key])
+	var intact := false
+	for weapon: Dictionary in SeriesScript.integrity_layout(enemy_kind).get("melee_segments",[]):
+		if int(weapon.part) != part: continue
+		var a: Vector3 = weapon.a
+		var b: Vector3 = weapon.b
+		var axis := b-a
+		var radius: float = float(weapon.get("radius",0.12))+_cell*0.87
+		for index: int in _live_indices:
+			if _voxels[index] == 0 or int(_part_ids[index]) != part: continue
+			var point: Vector3 = _cell_points[index]
+			var t := clampf((point-a).dot(axis)/maxf(axis.length_squared(),0.00001),0.0,1.0)
+			if point.distance_squared_to(a+axis*t) <= radius*radius:
+				intact = true
+				break
+		if intact: break
+	_emitter_cache[key] = intact
+	return intact
+
+
 func _emitter_intact(part: int) -> bool:
 	if not _emitter_cache.has(part):
 		_emitter_cache[part] = _scan_emitter_intact(part)
@@ -426,6 +665,7 @@ func _emitter_intact(part: int) -> bool:
 
 
 func _scan_emitter_intact(part: int) -> bool:
+	if SeriesScript.supports(enemy_kind): return SeriesScript.emitter_intact(self,part)
 	if ArchetypesScript.supports(enemy_kind): return ArchetypesScript.emitter_intact(self,part)
 	# Only surviving forward launch hardware counts. A rear wing stump must
 	# not keep firing after its actual gun / launch mouth has been sliced off.
@@ -444,7 +684,28 @@ func _scan_emitter_intact(part: int) -> bool:
 func set_action(action: String, phase: float) -> void:
 	if not _configured:
 		return
+	if SeriesScript.supports(enemy_kind):
+		if dead and action != "death":
+			_hide_action_props()
+			return
+		action_name = action
+		action_phase = clampf(phase,0.0,1.0)
+		var pose_state := _series_integrity.duplicate()
+		for key in ["series_attack_variant","series_feint","series_shield_open","series_burrow","series_entry_authored"]:
+			pose_state[key] = get_meta(key,0.0)
+		var pose: Dictionary = SeriesScript.sample_pose(enemy_kind,action,action_phase,age,lane_index,pose_state)
+		_rig.transform = pose.rig
+		for part in range(1,PART_COUNT): _parts[part].transform = pose.parts.get(part,Transform3D.IDENTITY)
+		_hide_action_props()
+		return
 	if dead:
+		_hide_action_props()
+		return
+	if enemy_kind == "boss_carrier":
+		action_name = action
+		action_phase = clampf(phase,0.0,1.0)
+		_rig.transform = Transform3D.IDENTITY
+		for part in range(1,PART_COUNT): _parts[part].transform = Transform3D.IDENTITY
 		_hide_action_props()
 		return
 	if _is_flying() or _is_construct():
@@ -455,8 +716,11 @@ func set_action(action: String, phase: float) -> void:
 	if enemy_kind in ["normal","tank","ranged","boss"]:
 		var delta := maxf(age-_walk_last_age,0.0)
 		_walk_last_age = age
-		if action == "run": _walk_distance += delta*maxf(0.0,float(get_meta("ground_run_speed",2.8)))
-		_walk_weight = move_toward(_walk_weight,1.0 if action == "run" else 0.0,delta*7.0)
+		var entry_walk: bool = action == "entry" and enemy_kind != "boss"
+		var walk_target: float = 1.0 if action == "run" else (smoothstep(0.88,1.0,clampf(phase,0.0,1.0)) if entry_walk else 0.0)
+		if action == "run" or entry_walk: _walk_distance += delta*maxf(0.0,float(get_meta("ground_run_speed",2.8)))*walk_target
+		if action == "entry": _walk_weight = walk_target
+		else: _walk_weight = move_toward(_walk_weight,walk_target,delta*7.0)
 		var step_length := 0.90 if enemy_kind == "normal" else (1.00 if enemy_kind == "tank" else (0.95 if enemy_kind == "ranged" else 1.10))
 		gait = MotionScript.sample_feet(_walk_distance*0.6,step_length,0.15 if enemy_kind == "normal" else 0.12)
 	action_name = action
@@ -471,11 +735,19 @@ func set_action(action: String, phase: float) -> void:
 	var heavy: bool = enemy_kind == "tank" or enemy_kind == "boss"
 	var active_arm: int = 0 if enemy_kind != "tank" or action_variant % 2 == 0 else 1
 	var run_phase: float = age * 10.0 + p * TAU
+	if action == "entry": run_phase = age*10.0+fmod(age*2.2,1.0)*TAU
 	var stride: float = sin(run_phase)
 	var charge_amount := 0.0
 	var flash_amount := 0.0
 	var trail_amount := 0.0
+	var entry_body: Dictionary = {}
 	match action:
+		"entry":
+			entry_body = MotionScript.sample_entry_body(enemy_kind,lane_index,p,run_phase,side)
+			body_angles = entry_body.angles
+			body_offset = entry_body.offset
+			left_arm = entry_body.left_arm
+			right_arm = entry_body.right_arm
 		"run":
 			body_angles = Vector3(0.035, sin(run_phase * 0.5) * 0.045, stride * 0.018)
 			body_offset.y = absf(stride) * 0.035
@@ -570,7 +842,7 @@ func set_action(action: String, phase: float) -> void:
 	if enemy_kind == "normal":
 		# The blade fighter carries its weapon across the body rather than
 		# hanging a long straight blade through the floor between attacks.
-		var ready_weight := 1.0 if action == "run" else (smooth if action == "recover" else 0.0)
+		var ready_weight := 1.0 if action == "run" else (smooth if action == "recover" else (smoothstep(0.60,0.90,p) if action == "entry" else 0.0))
 		right_arm.z -= ready_weight * 0.68
 		left_arm.z += ready_weight * 0.12
 	if enemy_kind in ["normal","tank","ranged","boss"]:
@@ -583,19 +855,23 @@ func set_action(action: String, phase: float) -> void:
 	if enemy_kind == "ranged":
 		# A rifle is carried by both hands, not counter-swung like a sword.
 		# Retain small shoulder compensation, bracing and recoil around its hold.
-		var brace := smooth if action == "ranged_charge" else (1.0 if action == "ranged_fire" else (1.0-smooth if action == "recover" else 0.0))
+		var brace := smooth if action == "ranged_charge" else (1.0 if action == "ranged_fire" else (1.0-smooth if action == "recover" else (0.35*(1.0-smoothstep(0.28,0.95,p)) if action == "entry" else 0.0)))
 		var kick := sin(minf(p*2.0,1.0)*PI)*(1.0-p) if action == "ranged_fire" else (0.55*sin(p*PI) if action == "stagger" else 0.0)
 		var thrust := sin(p*PI) if action == "strike" else -0.35*smooth if action == "windup" else 0.0
 		var compensation := float(gait.left_arm)*0.06*_walk_weight
 		var right_hold := Vector3(-0.07*brace+0.06*kick+0.10*thrust+compensation,0,-0.025*brace)
 		var left_hold := Vector3(-0.05*brace+0.04*kick+0.08*thrust+compensation,0,0.018*brace)
+		if action == "entry":
+			var low_carry: float = 1.0-smoothstep(0.70,1.0,p)
+			right_hold = Vector3(0.28*low_carry+compensation,0,-0.12*low_carry)
+			left_hold = Vector3(0.22*low_carry+compensation,0,0.15*low_carry)
 		var blend := 1.0 if not _ranged_hold_initialized else 1.0-exp(-ranged_delta*18.0)
 		_ranged_right_hold = _ranged_right_hold.lerp(right_hold,blend)
 		_ranged_left_hold = _ranged_left_hold.lerp(left_hold,blend)
 		right_arm = _ranged_right_hold
 		left_arm = _ranged_left_hold
 	_pose(body_angles, body_offset, left_arm, right_arm)
-	if enemy_kind in ["normal","tank","ranged","boss"]: _pose_walking_legs(gait)
+	if enemy_kind in ["normal","tank","ranged","boss"]: _pose_walking_legs(gait,entry_body)
 	if enemy_kind != "boss":
 		for weapon in _weapons:
 			weapon.rotation = Vector3.ZERO
@@ -638,6 +914,12 @@ func _update_ranged_hold(sim_delta: float) -> void:
 		var yaw := clampf(atan2(to_target.x,to_target.z),-0.80,0.80)
 		var pitch := clampf(atan2(to_target.y,Vector2(to_target.x,to_target.z).length()),-0.38,0.38)
 		desired = (global_basis*Vector3(sin(yaw)*cos(pitch),sin(pitch),cos(yaw)*cos(pitch))).normalized()
+	if action_name == "entry":
+		# The same real trigger palm and support-arm IK carry the low weapon
+		# through a held left check, a cross-body right check, then camera aim.
+		var scan: float = lerpf(-0.78,0.70,smoothstep(0.32,0.56,action_phase))
+		var inspect: Vector3 = (global_basis*Vector3(sin(scan)*cos(-0.38),sin(-0.38),cos(scan)*cos(-0.38))).normalized()
+		desired = inspect.slerp(desired,smoothstep(0.70,0.96,action_phase)).normalized()
 	if not _ranged_hold_initialized or (front_target and not _ranged_seen_front_target):
 		_ranged_aim_direction = desired
 	else:
@@ -682,6 +964,13 @@ func _set_expansion_action(action: String, phase: float) -> void:
 	var offset := Vector3(0,hover,-0.12*kick)
 	var fold := charge * 0.08
 	match action:
+		"entry":
+			var entry_weights: Vector2 = MotionScript.flyer_entry_weights(action_phase)
+			var entry_fold: float = entry_weights.x
+			var entry_brake: float = entry_weights.y
+			var entry_side: float = -1.0 if posmod(lane_index,2)==0 else 1.0
+			angles += Vector3(0.12*entry_fold-0.18*entry_brake,entry_side*0.16*entry_brake,entry_side*(0.18*entry_fold-0.22*entry_brake))
+			fold = 0.50*entry_fold-0.30*entry_brake
 		"windup":
 			var lift := smoothstep(0.0,0.82,action_phase)
 			angles.x = -0.27*lift
@@ -725,8 +1014,10 @@ func _part_for_index(index: int) -> int:
 
 
 func _classify_part_index(index: int) -> int:
+	if SeriesScript.supports(enemy_kind): return int(_series_authored_parts[index])
 	var coords: Vector3i = _coords(index)
 	var center_x: int = _dimensions.x / 2
+	if enemy_kind == "boss_carrier": return CarrierScript.classify_part(_point(coords.x,coords.y,coords.z))
 	if _is_construct():
 		return 0
 	if _is_flying():
@@ -804,7 +1095,7 @@ func _pose(body_angles: Vector3, offset: Vector3, left_angles: Vector3, right_an
 		_parts[index].transform = Transform3D(arm_basis, arm_pivot - arm_basis * arm_pivot)
 
 
-func _pose_walking_legs(gait: Dictionary) -> void:
+func _pose_walking_legs(gait: Dictionary, entry_body: Dictionary = {}) -> void:
 	var rig_inverse := _rig.transform.affine_inverse()
 	for leg in range(2):
 		var side := -1.0 if leg == 0 else 1.0
@@ -826,6 +1117,9 @@ func _pose_walking_legs(gait: Dictionary) -> void:
 		var step: Vector3 = gait.left if leg == 0 else gait.right
 		if enemy_kind == "boss": step = Vector3.ZERO
 		step.y *= _walk_weight
+		if not entry_body.is_empty():
+			var entry_step: Vector3 = entry_body.left_foot if leg == 0 else entry_body.right_foot
+			step = step.lerp(entry_step,float(entry_body.feet_blend))
 		var solved: Dictionary = MotionScript.solve_leg(hip,knee,ankle,rig_inverse*(ankle+step))
 		_parts[3+leg].transform = solved.upper
 		_parts[5+leg].transform = solved.lower
@@ -866,7 +1160,10 @@ func _build_action_rig() -> void:
 	_body = _part_meshes[0]
 	_weapon_edge_material = _prop_material(Color("ff8844"), true)
 	_expansion_glows.clear()
-	if ArchetypesScript.supports(enemy_kind):
+	if SeriesScript.supports(enemy_kind):
+		# Weapons are real voxel cells. No uncuttable decorative duplicate.
+		pass
+	elif ArchetypesScript.supports(enemy_kind):
 		for emitter: Dictionary in ArchetypesScript.emitters(enemy_kind):
 			var part_index := int(emitter.part)
 			var glow := _box_prop(_parts[part_index],Vector3(0.08,0.08,0.035),Vector3(emitter.point),_weapon_edge_material)
@@ -880,7 +1177,7 @@ func _build_action_rig() -> void:
 			glow.name = "LaunchCharge"
 			glow.set_meta("emitter_part", part_index)
 			_expansion_glows.append(glow)
-	elif not _is_construct():
+	elif not _is_construct() and enemy_kind != "boss_carrier":
 		for part_index in [2, 1]:
 			var weapon := Node3D.new()
 			weapon.name = "WeaponRight" if part_index == 2 else "WeaponLeft"
@@ -1139,10 +1436,14 @@ func _prop_material(color: Color, glowing: bool = false) -> StandardMaterial3D:
 
 
 func _box_prop(parent: Node3D, dimensions: Vector3, at: Vector3, material: Material) -> MeshInstance3D:
-	var mesh := BoxMesh.new()
-	mesh.size = dimensions
+	if not _prop_box_meshes.has(dimensions):
+		var mesh := BoxMesh.new()
+		mesh.size = dimensions
+		_prop_box_meshes[dimensions] = mesh
 	var instance := MeshInstance3D.new()
-	instance.mesh = mesh
+	# Geometry is immutable; transforms, visibility and materials remain on
+	# each actor's own instance, including its temporary entry fade override.
+	instance.mesh = _prop_box_meshes[dimensions]
 	instance.material_override = material
 	instance.position = at
 	parent.add_child(instance)
@@ -1150,13 +1451,15 @@ func _box_prop(parent: Node3D, dimensions: Vector3, at: Vector3, material: Mater
 
 
 func _sphere_prop(parent: Node3D, radius: float, at: Vector3, material: Material) -> MeshInstance3D:
-	var mesh := SphereMesh.new()
-	mesh.radius = radius
-	mesh.height = radius * 2.0
-	mesh.radial_segments = 12
-	mesh.rings = 6
+	if not _prop_sphere_meshes.has(radius):
+		var mesh := SphereMesh.new()
+		mesh.radius = radius
+		mesh.height = radius * 2.0
+		mesh.radial_segments = 12
+		mesh.rings = 6
+		_prop_sphere_meshes[radius] = mesh
 	var instance := MeshInstance3D.new()
-	instance.mesh = mesh
+	instance.mesh = _prop_sphere_meshes[radius]
 	instance.material_override = material
 	instance.position = at
 	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -1210,6 +1513,25 @@ func get_remaining_voxel_count(include_fragments: bool = true) -> int:
 	return count
 
 
+func release_series_death_part(part: int) -> bool:
+	# A defeated Boss can shed its retained REAL body over the authored exit.
+	# One whole occupied part uses the existing immutable mesh and recuttable
+	# fragment rules. A full debris budget leaves all material in the body.
+	if not dead or not SeriesScript.supports(enemy_kind) or not bool(SeriesScript.info(enemy_kind).boss): return false
+	if part < 0 or part >= PART_COUNT: return false
+	var indices := PackedInt32Array()
+	for index: int in _live_indices:
+		if _voxels[index] > 0 and int(_part_ids[index]) == part: indices.append(index)
+	if indices.is_empty() or not _spawn_fragment(indices,Vector2(0,-0.3),true): return false
+	for index: int in indices: _voxels[index] = 0
+	_hand_cache.clear()
+	_emitter_cache.clear()
+	_mesh_full_dirty_mask |= 1<<part
+	_next_mesh_mask = 1<<part
+	_rebuild_body()
+	return true
+
+
 func retire_for_encounter(camera: Camera3D) -> void:
 	# A chapter handoff is not a sword hit or a structural kill. Preserve
 	# material and dead state until this detached visual owner is freed.
@@ -1254,6 +1576,7 @@ func blast_at(world_point: Vector3, radius: float) -> Dictionary:
 	for index in _live_indices:
 		if _voxels[index] != 0 and relevant[_part_ids[index]] and (poses[_part_ids[index]] * _cell_points[index]).distance_squared_to(world_point) <= radius_squared:
 			removed.append(index)
+	removed = _entry_material_budget(removed,world_point,true)
 	if removed.is_empty():
 		return {"removed": 0, "killed": false}
 	# Explosions alter the same material / connected components as the sword.
@@ -1362,7 +1685,12 @@ func _cut_body(camera: Camera3D, points: PackedVector2Array, power: float, blade
 		depth_budget = clampi(int(floor(power * 1.40)), 1, _dimensions.z)
 	elif enemy_kind == "boss":
 		depth_budget = clampi(int(floor(power * 1.25)), 1, _dimensions.z)
-	var armored := enemy_kind in ["tank", "boss", "shield_drone"]
+	elif enemy_kind == "boss_carrier":
+		depth_budget = clampi(int(floor(power * 1.60)),1,_dimensions.z)
+	var armored := enemy_kind in ["tank", "boss", "shield_drone", "boss_carrier"]
+	if SeriesScript.supports(enemy_kind):
+		armored = bool(SeriesScript.info(enemy_kind).armored)
+		if armored: depth_budget = clampi(int(floor(power*1.40)),1,_dimensions.z)
 	var part_poses: Array[Transform3D] = []
 	if armored or _uses_fine_grid():
 		for part in range(PART_COUNT):
@@ -1389,10 +1717,204 @@ func _cut_body(camera: Camera3D, points: PackedVector2Array, power: float, blade
 				cut_indices.append(index)
 	else:
 		cut_indices = _select_coarse_cut(camera, points, relevant_segments, regions, band, depth_budget, armored, part_poses)
+	cut_indices = _entry_material_budget(cut_indices,camera.global_position,false)
 	if cut_indices.is_empty():
 		last_cut_usec = Time.get_ticks_usec() - start_time
 		return {"removed": 0, "killed": false}
 	return _commit_material_cut(cut_indices, stroke, camera, start_time)
+
+
+func reset_entry_material_budget() -> void:
+	# The entry owner calls this at both boundaries, including repeated entries
+	# of the same live actor. Fractional contact never leaks into another entry.
+	_entry_material_remainder = 0
+
+
+func set_entry_visibility(amount: float) -> void:
+	var value: float = clampf(amount,0.0,1.0)
+	var pose_fade: bool = bool(get_meta("entry_active",false)) and (enemy_kind in ["normal","tank","ranged"] or SeriesScript.supports(enemy_kind))
+	if value >= 1.0 or dead or not _configured or not (pose_fade or has_meta("deployment_fade_age")):
+		_restore_entry_visibility()
+		return
+	if not _entry_visibility_active: _begin_entry_visibility()
+	# Hide the owner at exact zero: no colour, glowing rail or early shadow.
+	# Do not toggle individual meshes; severed hands and inactive flashes keep
+	# their own visibility state throughout the fade and after restoration.
+	visible = _entry_visibility_owner_visible and value > 0.0
+	var body: ShaderMaterial = _material as ShaderMaterial
+	if body != null: body.set_shader_parameter("entry_visibility",value)
+	for row: Dictionary in _entry_visibility_props:
+		var source: StandardMaterial3D = row.source
+		var fade: ShaderMaterial = row.fade
+		fade.set_shader_parameter("entry_visibility",value)
+		fade.set_shader_parameter("prop_color",source.albedo_color)
+		fade.set_shader_parameter("prop_metallic",source.metallic)
+		fade.set_shader_parameter("prop_roughness",source.roughness)
+		fade.set_shader_parameter("prop_specular",source.metallic_specular)
+		fade.set_shader_parameter("prop_emission",source.emission if source.emission_enabled else Color.BLACK)
+		fade.set_shader_parameter("prop_energy",source.emission_energy_multiplier)
+		fade.set_shader_parameter("prop_opacity",source.albedo_color.a if source.transparency != BaseMaterial3D.TRANSPARENCY_DISABLED else 1.0)
+
+
+func _entry_swap_body_shader(shader: Shader) -> void:
+	var body: ShaderMaterial = _material as ShaderMaterial
+	if body == null: return
+	var values: Dictionary = {}
+	for name in ["warning","paint_value","heat_value","boss_ports","boss_reactor_power"]:
+		values[name] = body.get_shader_parameter(name)
+	body.shader = shader
+	for name: String in values: body.set_shader_parameter(name,values[name])
+
+
+func _begin_entry_visibility() -> void:
+	_entry_visibility_active = true
+	_entry_visibility_owner_visible = visible
+	_entry_visibility_fragment_material = null
+	var body: ShaderMaterial = _material as ShaderMaterial
+	if body != null:
+		_entry_visibility_body_shader = body.shader
+		if _shared_entry_body_shader == null:
+			_shared_entry_body_shader = Shader.new()
+			var code: String = body.shader.code
+			code = code.replace("varying vec3 authored_position;","uniform float entry_visibility : hint_range(0.0,1.0) = 1.0;\nvarying vec3 authored_position;")
+			code = code.replace("void fragment() {","""void fragment() {
+	if (entry_visibility < 1.0) {
+		vec3 cell = floor(authored_position * 64.0);
+		float coverage = fract(sin(dot(cell,vec3(12.9898,78.233,37.719))) * 43758.5453);
+		if (entry_visibility <= coverage) { discard; }
+	}
+""")
+			_shared_entry_body_shader.code = code
+		_entry_swap_body_shader(_shared_entry_body_shader)
+	# Only actor-owned overrides are replaced. Immutable cached body meshes and
+	# the shared original shader never receive a material or uniform mutation.
+	var proxies: Dictionary = {}
+	var pending: Array[Node] = [self]
+	while not pending.is_empty():
+		var node: Node = pending.pop_back()
+		pending.append_array(node.get_children())
+		if not node is MeshInstance3D: continue
+		var mesh: MeshInstance3D = node as MeshInstance3D
+		var source: StandardMaterial3D = mesh.material_override as StandardMaterial3D
+		if source == null: continue
+		var key: int = source.get_instance_id()
+		var fade: ShaderMaterial
+		if proxies.has(key): fade = proxies[key]
+		else:
+			fade = ShaderMaterial.new()
+			fade.shader = _entry_prop_shader(source.shading_mode == BaseMaterial3D.SHADING_MODE_UNSHADED)
+			proxies[key] = fade
+			_entry_visibility_props.append({"source":source,"fade":fade})
+		_entry_visibility_bindings.append({"mesh":mesh,"original":mesh.material_override})
+		mesh.material_override = fade
+
+
+static func _entry_prop_shader(unshaded: bool) -> Shader:
+	if _shared_entry_prop_shaders.has(unshaded): return _shared_entry_prop_shaders[unshaded]
+	var shader := Shader.new()
+	shader.code = "shader_type spatial;\n"+("render_mode unshaded;\n" if unshaded else "")+"""
+uniform float entry_visibility : hint_range(0.0,1.0) = 1.0;
+uniform vec4 prop_color : source_color = vec4(1.0);
+uniform vec4 prop_emission : source_color = vec4(0.0);
+uniform float prop_metallic = 0.65;
+uniform float prop_roughness = 0.35;
+uniform float prop_specular = 0.5;
+uniform float prop_energy = 1.0;
+uniform float prop_opacity = 1.0;
+varying vec3 entry_local_position;
+void vertex() { entry_local_position = VERTEX; }
+void fragment() {
+	vec3 cell = floor(entry_local_position * 64.0);
+	float coverage = fract(sin(dot(cell,vec3(12.9898,78.233,37.719))) * 43758.5453);
+	if (entry_visibility * prop_opacity <= coverage) { discard; }
+	ALBEDO = prop_color.rgb;
+	METALLIC = prop_metallic;
+	ROUGHNESS = prop_roughness;
+	SPECULAR = prop_specular;
+	EMISSION = prop_emission.rgb * prop_energy;
+}
+"""
+	_shared_entry_prop_shaders[unshaded] = shader
+	return shader
+
+
+func _restore_entry_visibility() -> void:
+	if not _entry_visibility_active: return
+	if _entry_visibility_body_shader != null: _entry_swap_body_shader(_entry_visibility_body_shader)
+	for row: Dictionary in _entry_visibility_bindings:
+		if is_instance_valid(row.mesh): row.mesh.material_override = row.original
+	visible = _entry_visibility_owner_visible
+	_entry_visibility_bindings.clear()
+	_entry_visibility_props.clear()
+	_entry_visibility_fragment_material = null
+	_entry_visibility_body_shader = null
+	_entry_visibility_active = false
+
+
+func _entry_detached_material() -> Material:
+	if not _entry_visibility_active: return _material
+	if _entry_visibility_fragment_material == null:
+		var opaque: ShaderMaterial = (_material as ShaderMaterial).duplicate() as ShaderMaterial
+		var values: Dictionary = {}
+		for name in ["warning","paint_value","heat_value","boss_ports","boss_reactor_power"]:
+			values[name] = opaque.get_shader_parameter(name)
+		opaque.shader = _entry_visibility_body_shader
+		for name: String in values: opaque.set_shader_parameter(name,values[name])
+		_entry_visibility_fragment_material = opaque
+	return _entry_visibility_fragment_material
+
+
+func _entry_material_budget(candidates: PackedInt32Array, reference: Vector3, radial: bool) -> PackedInt32Array:
+	var protected_entry: bool = not dead and bool(get_meta("entry_active",false)) and enemy_kind in ["drone","missile_drone","shield_drone","interceptor","mine_layer"]
+	if SeriesScript.supports(enemy_kind):
+		var metadata: Dictionary = SeriesScript.info(enemy_kind)
+		protected_entry = not dead and bool(get_meta("entry_active",false)) and bool(metadata.flying) and not bool(metadata.boss)
+	if not protected_entry:
+		_entry_material_remainder = 0
+		return candidates
+	if candidates.is_empty(): return candidates
+	# Credit is only the fractional remainder of real candidate material, not
+	# health. No min1: four one-cell contacts earn one real removed cell. Blade
+	# paths, held sweeps and actual sphere blasts share this same remainder.
+	var units: int = candidates.size()+_entry_material_remainder
+	var budget: int = mini(candidates.size(),int(units/ENTRY_MATERIAL_DIVISOR))
+	_entry_material_remainder = units%ENTRY_MATERIAL_DIVISOR
+	if budget <= 0: return PackedInt32Array()
+	if budget >= candidates.size(): return candidates
+	var poses: Array[Transform3D] = []
+	for part in range(PART_COUNT): poses.append(global_transform*_part_pose(part))
+	var ordered: Array[int] = []
+	var depths: Dictionary = {}
+	var distances: Dictionary = {}
+	var next_layer: Dictionary = {}
+	for index in candidates:
+		var layer: int = 0
+		if not radial and enemy_kind == "shield_drone":
+			# The shield selector already emits each column's facing prefix.
+			# Keep its order even during the side-on portion of the entry turn;
+			# a rear candidate cannot spend credit before its selected front.
+			var coordinate: Vector3i = _coords(index)
+			var column: int = coordinate.x+coordinate.y*_dimensions.x
+			layer = int(next_layer.get(column,0))
+			next_layer[column] = layer+1
+		var point: Vector3 = poses[_part_ids[index]]*_cell_points[index]
+		ordered.append(index)
+		depths[index] = layer
+		# Sword candidates are taken from the nearer actual material first;
+		# blast candidates contract around their actual world-space centre.
+		distances[index] = point.distance_squared_to(reference)
+	ordered.sort_custom(func(a: int, b: int) -> bool:
+		var a_depth: int = int(depths[a])
+		var b_depth: int = int(depths[b])
+		if a_depth != b_depth: return a_depth < b_depth
+		var a_distance: float = float(distances[a])
+		var b_distance: float = float(distances[b])
+		return a < b if a_distance == b_distance else a_distance < b_distance
+	)
+	var selected := PackedInt32Array()
+	selected.resize(budget)
+	for offset in range(budget): selected[offset] = ordered[offset]
+	return selected
 
 
 func _commit_material_cut(cut_indices: PackedInt32Array, stroke: Vector2, camera: Camera3D, start_time: int) -> Dictionary:
@@ -1444,20 +1966,42 @@ func _commit_material_cut(cut_indices: PackedInt32Array, stroke: Vector2, camera
 			largest = indices.size()
 			primary = group_index
 	var was_dead := dead
+	var is_series := SeriesScript.supports(enemy_kind)
+	var series_boss := enemy_kind in SeriesScript.BOSSES
+	if is_series: _refresh_series_integrity(groups)
+	var carrier_primary := -1
+	if enemy_kind == "boss_carrier":
+		carrier_primary = _refresh_carrier_hangers(groups)
+		primary = carrier_primary
 	if enemy_kind == "boss":
 		_refresh_boss_reactors(groups)
 		# The head is a removable sensor. Each real reactor and its own retained
 		# base connection can power the remaining machine independently.
 		dead = was_dead or not _boss_reactor_connected.has(true)
+	elif enemy_kind == "boss_carrier":
+		dead = was_dead or carrier_primary < 0
+	elif series_boss:
+		dead = was_dead or int(_series_integrity.powered_modules) == 0
+		if dead:
+			# Preserve the largest actual surviving body for authored death motion.
+			largest = 0
+			for group_index in range(groups.size()):
+				if groups[group_index].indices.size() > largest:
+					largest = groups[group_index].indices.size()
+					primary = group_index
 	else:
 		dead = was_dead or not core_survives or not core_connected_to_base or not head_connected_to_base
+	if dead and not was_dead: _restore_entry_visibility()
 	if is_instance_valid(camera):
 		DebrisScript.emit_cut_particles(self, camera, spark_sources, stroke, _cell, "sever" if dead and not was_dead else "body")
 	for group_index in range(groups.size()):
+		if series_boss and dead and group_index == primary: continue
 		if not dead:
 			var flags: int = groups[group_index].flags
 			if enemy_kind == "boss":
 				if flags & ANCHOR_TAG and flags & (BOSS_LEFT_REACTOR_TAG|BOSS_RIGHT_REACTOR_TAG): continue
+			elif series_boss:
+				if SeriesScript.powered_boss_modules(flags) != 0: continue
 			elif group_index == primary:
 				continue
 		var indices: PackedInt32Array = groups[group_index]["indices"]
@@ -1485,6 +2029,9 @@ func _commit_material_cut(cut_indices: PackedInt32Array, stroke: Vector2, camera
 
 func _select_coarse_cut(camera: Camera3D, points: PackedVector2Array, relevant_segments: PackedInt32Array, regions: Array[Dictionary], band: float, depth_budget: int, armored: bool, part_poses: Array[Transform3D]) -> PackedInt32Array:
 	var cut_indices := PackedInt32Array()
+	var inverse_poses: Array[Transform3D] = []
+	if SeriesScript.supports(enemy_kind):
+		for pose: Transform3D in part_poses: inverse_poses.append(pose.affine_inverse())
 	# Columns contain authored occupied cells only, ordered by their real Z.
 	# Removed cells are skipped, while the first *surviving* facing layer still
 	# blocks later layers when the narrow blade missed it. Fine grids need not
@@ -1510,12 +2057,75 @@ func _select_coarse_cut(camera: Camera3D, points: PackedVector2Array, relevant_s
 				break
 			if removed_in_column >= depth_budget:
 				break
+			if not inverse_poses.is_empty() and _series_material_occluded(index,camera.global_position,world_point,inverse_poses,depth_budget): continue
 			removed_in_column += 1
 			cut_indices.append(index)
 	return cut_indices
 
 
+func _series_material_occluded(target_index: int, origin: Vector3, target: Vector3, inverse_poses: Array[Transform3D], budget: int) -> bool:
+	var before := 0
+	var low := _point(0,0,0)-Vector3.ONE*_cell*0.5
+	var full_bounds := AABB(low,Vector3(_dimensions)*_cell)
+	var dx := _dimensions.x
+	var dy := _dimensions.y
+	var dz := _dimensions.z
+	var plane := dx*dy
+	for part in range(PART_COUNT):
+		if _mesh_cell_counts.size() == PART_COUNT and _mesh_cell_counts[part] == 0: continue
+		var bounds := full_bounds
+		if _part_meshes.size() == PART_COUNT and _part_meshes[part].mesh != null: bounds = _part_meshes[part].mesh.get_aabb()
+		var from: Vector3 = inverse_poses[part]*origin
+		var to: Vector3 = inverse_poses[part]*target
+		var entry := _segment_box_fraction(from,to,bounds)
+		if entry == INF: continue
+		var direction := to-from
+		var t := maxf(entry,0.0)+0.0000001
+		var grid := Vector3i(((from+direction*t-low)/_cell).floor()).clamp(Vector3i.ZERO,_dimensions-Vector3i.ONE)
+		var step := Vector3i(signi(int(signf(direction.x))),signi(int(signf(direction.y))),signi(int(signf(direction.z))))
+		var next := Vector3(INF,INF,INF)
+		var delta := Vector3(INF,INF,INF)
+		for axis in range(3):
+			if absf(direction[axis]) < 0.00000001: continue
+			var boundary: float = low[axis]+float(grid[axis]+(1 if step[axis] > 0 else 0))*_cell
+			next[axis] = (boundary-from[axis])/direction[axis]
+			delta[axis] = _cell/absf(direction[axis])
+		var x := grid.x
+		var y := grid.y
+		var z := grid.z
+		var index := _index(x,y,z)
+		var stride_y := step.y*dx
+		var stride_z := step.z*plane
+		# Keep next/delta as float32 Vector3, exactly as production. Converting
+		# the accumulators to scalar doubles changes corner/tie ray semantics.
+		while x >= 0 and y >= 0 and z >= 0 and x < dx and y < dy and z < dz and t < 0.9999999:
+			if index != target_index and _voxels[index] > 0 and int(_part_ids[index]) == part:
+				before += 1
+				if before >= budget: return true
+			t = minf(next.x,minf(next.y,next.z))
+			if t > 0.9999999: break
+			if next.x <= t+0.00000001:
+				x += step.x
+				index += step.x
+				next.x += delta.x
+			if next.y <= t+0.00000001:
+				y += step.y
+				index += stride_y
+				next.y += delta.y
+			if next.z <= t+0.00000001:
+				z += step.z
+				index += stride_z
+				next.z += delta.z
+	return false
+
+
 func _build_robot() -> void:
+	if SeriesScript.supports(enemy_kind):
+		SeriesScript.build(self)
+		return
+	if enemy_kind == "boss_carrier":
+		CarrierScript.build(self)
+		return
 	if ArchetypesScript.supports(enemy_kind):
 		ArchetypesScript.build(self)
 		return
@@ -1942,6 +2552,16 @@ func _slasher_tags(center: Vector3, size: Vector3, tag: int) -> void:
 
 
 func _build_slasher_blade(weapon: Node3D, steel: Material) -> void:
+	var blade := MeshInstance3D.new()
+	blade.name = "BroadSlasherBlade"
+	blade.mesh = _slasher_blade_mesh()
+	blade.material_override = steel
+	weapon.add_child(blade)
+	_box_prop(weapon, Vector3(0.025, 1.18, 0.08), Vector3(0.155,-0.80,0), _weapon_edge_material)
+
+
+static func _slasher_blade_mesh() -> ArrayMesh:
+	if _shared_slasher_blade != null: return _shared_slasher_blade
 	var profile := PackedVector2Array([Vector2(-0.10, -0.20), Vector2(0.13, -0.20), Vector2(0.18, -1.23), Vector2(0.07, -1.57), Vector2(-0.10, -1.70), Vector2(-0.14, -1.20)])
 	var surface := SurfaceTool.new()
 	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -1958,12 +2578,8 @@ func _build_slasher_blade(weapon: Node3D, steel: Material) -> void:
 		for point in [Vector3(a.x,a.y,-0.035), Vector3(b.x,b.y,-0.035), Vector3(b.x,b.y,0.035), Vector3(a.x,a.y,-0.035), Vector3(b.x,b.y,0.035), Vector3(a.x,a.y,0.035)]:
 			surface.set_normal(normal)
 			surface.add_vertex(point)
-	var blade := MeshInstance3D.new()
-	blade.name = "BroadSlasherBlade"
-	blade.mesh = surface.commit()
-	blade.material_override = steel
-	weapon.add_child(blade)
-	_box_prop(weapon, Vector3(0.025, 1.18, 0.08), Vector3(0.155,-0.80,0), _weapon_edge_material)
+	_shared_slasher_blade = surface.commit()
+	return _shared_slasher_blade
 
 
 func _recolor_box(x0: int, y0: int, z0: int, x1: int, y1: int, z1: int, color_index: int) -> void:
@@ -2210,7 +2826,7 @@ void fragment() {
 	var body_material := ShaderMaterial.new()
 	body_material.shader = body_shader
 	body_material.set_shader_parameter("paint_value", 0.74 if enemy_kind == "normal" else 0.82)
-	body_material.set_shader_parameter("heat_value", 1.0 if _is_flying() or enemy_kind in ["tank","boss"] else 0.0)
+	body_material.set_shader_parameter("heat_value", 1.0 if _is_flying() or enemy_kind in ["tank","boss","boss_carrier"] else 0.0)
 	body_material.set_shader_parameter("boss_ports",1.0 if enemy_kind == "boss" else 0.0)
 	body_material.set_shader_parameter("boss_reactor_power",Vector2.ONE)
 	_material = body_material
@@ -2279,9 +2895,8 @@ func _rebuild_body() -> void:
 	if _mesh_cell_counts.size() != PART_COUNT:
 		_mesh_cell_counts.resize(PART_COUNT)
 	if not _initial_meshes.is_empty():
-		_mesh_cell_counts.fill(0)
-		for index in _live_indices:
-			_mesh_cell_counts[_part_ids[index]] += 1
+		_mesh_cell_counts = _initial_mesh_cell_counts.duplicate()
+		_initial_mesh_cell_counts = PackedInt32Array()
 		for part_index in range(PART_COUNT):
 			_part_meshes[part_index].mesh = _initial_meshes[part_index]
 			_part_meshes[part_index].visible = _initial_meshes[part_index] != null
@@ -2298,7 +2913,8 @@ func _rebuild_body() -> void:
 	var retained := PackedInt32Array()
 	for index in _live_indices:
 		if _voxels[index] != 0:
-			groups[_part_for_index(index)].append(index)
+			var part: int = _part_ids[index]
+			if _next_mesh_mask & (1 << part): groups[part].append(index)
 			retained.append(index)
 	_live_indices = retained
 	for part_index in range(PART_COUNT):
@@ -2309,9 +2925,13 @@ func _rebuild_body() -> void:
 		if indices.is_empty():
 			_part_meshes[part_index].mesh = null
 			if _mesh_slice_ready:
-				_mesh_slice_arrays[part_index].clear()
+				_mesh_slice_arrays[part_index] = {}
+				_mesh_shared_slice_mask &= ~(1 << part_index)
 				_mesh_dirty_slices[part_index].clear()
 		elif _mesh_slice_ready and (_mesh_full_dirty_mask & (1 << part_index)) == 0 and not _mesh_dirty_slices[part_index].is_empty():
+			if _mesh_shared_slice_mask & (1 << part_index):
+				_mesh_slice_arrays[part_index] = _mesh_slice_arrays[part_index].duplicate()
+				_mesh_shared_slice_mask &= ~(1 << part_index)
 			var slices: Dictionary = _mesh_slice_arrays[part_index]
 			for key: Vector2i in _mesh_dirty_slices[part_index]:
 				var patch := _build_mesh_slice(part_index,key)
@@ -2329,6 +2949,7 @@ func _rebuild_body() -> void:
 			_part_meshes[part_index].mesh = _build_mesh(indices, Vector3.ZERO, membership)
 			if _mesh_slice_ready:
 				_mesh_slice_arrays[part_index] = _capture_mesh_slices(_part_meshes[part_index].mesh)
+				_mesh_shared_slice_mask &= ~(1 << part_index)
 				_mesh_dirty_slices[part_index].clear()
 		_part_meshes[part_index].visible = not indices.is_empty()
 	_next_mesh_mask = FULL_MESH_MASK
@@ -2336,18 +2957,11 @@ func _rebuild_body() -> void:
 	_refresh_weapon_visibility()
 
 
-func _copy_slice_dictionaries(source: Array) -> Array[Dictionary]:
-	var result: Array[Dictionary] = []
-	# Entries hold immutable packed arrays. Each actor owns the dictionaries
-	# that replace entries; assembly never writes into the shared arrays.
-	for part: Dictionary in source: result.append(part.duplicate())
-	return result
-
-
 func _seed_mesh_slices(meshes: Array) -> void:
 	_mesh_slice_indices = []
 	_mesh_slice_arrays = []
 	_mesh_dirty_slices = []
+	_mesh_shared_slice_mask = 0
 	for part in range(PART_COUNT):
 		_mesh_slice_indices.append({})
 		_mesh_slice_arrays.append(_capture_mesh_slices(meshes[part]))
@@ -2428,7 +3042,7 @@ func _build_mesh_slice(part: int, key: Vector2i) -> Dictionary:
 	var shade := 0.84+maxf(normal.y,0.0)*0.16
 	for material: int in layers:
 		var mask: Dictionary = layers[material]
-		var color: Color = PALETTE[material]
+		var color: Color = _body_palette()[material]
 		var tint := Color(color.r*shade,color.g*shade,color.b*shade,1.0)
 		surface.set_normal(normal)
 		surface.set_color(tint)
@@ -2497,7 +3111,7 @@ func _build_mesh(indices: PackedInt32Array, origin: Vector3, membership: Diction
 	for index in indices:
 		var coords: Vector3i = _coords(index)
 		var point: Vector3 = _point(coords.x, coords.y, coords.z) - origin
-		var color: Color = PALETTE[_voxels[index]]
+		var color: Color = _body_palette()[_voxels[index]]
 		for side in range(6):
 			var neighbor: Vector3i = coords + DIRECTIONS[side]
 			var neighbor_index: int = _index(neighbor.x, neighbor.y, neighbor.z) if _inside(neighbor) else -1
@@ -2565,6 +3179,11 @@ func _spawn_posed_fragment(indices: PackedInt32Array, part: int, stroke: Vector2
 	fragment.name = "SeveredVoxelChunk"
 	fragment.transform = pose * Transform3D(Basis.IDENTITY, center)
 	fragment.floor_height = maxf(0.08, fragment.position.y - lowest_y + _cell * 0.5)
+	if enemy_kind == "boss_carrier":
+		fragment.set_meta("world_floor_height",fragment.floor_height)
+		fragment.floor_height -= global_position.y
+	if has_meta("sky_lane") or (SeriesScript.supports(enemy_kind) and absf(global_position.y) > 0.000001):
+		fragment.floor_height -= global_position.y
 	var side: float = signf(center.x)
 	if is_zero_approx(side):
 		side = _rng.randf_range(-1.0, 1.0)
@@ -2586,7 +3205,7 @@ func _spawn_posed_fragment(indices: PackedInt32Array, part: int, stroke: Vector2
 	var source_mesh: ArrayMesh = null
 	if _mesh_cell_counts.size() == PART_COUNT and indices.size() == _mesh_cell_counts[part]:
 		source_mesh = _part_meshes[part].mesh as ArrayMesh
-	fragment.configure_voxels(cells, _cell, PALETTE, _material, _point(0, 0, 0) - center, source_mesh, -center)
+	fragment.configure_voxels(cells, _cell, _body_palette(), _entry_detached_material(), _point(0, 0, 0) - center, source_mesh, -center)
 
 
 func get_cut_particle_debug_state() -> Dictionary:
@@ -2655,11 +3274,32 @@ func _fine_components() -> Array[Dictionary]:
 			head+=1
 			flags|=_tags[current]
 			var base:=current*6
-			for side in range(6):
-				var adjacent:int=_fine_neighbors[base+side]
-				if adjacent>=0 and _voxels[adjacent]!=0 and visited[adjacent]==0:
-					visited[adjacent]=1
-					queue.append(adjacent)
+			# Keep side0..5 and FIFO discovery order while avoiding a per-cell
+			# six-step iterator. Mark on enqueue exactly as in the looped BFS.
+			var adjacent:int=_fine_neighbors[base]
+			if adjacent>=0 and _voxels[adjacent]!=0 and visited[adjacent]==0:
+				visited[adjacent]=1
+				queue.append(adjacent)
+			adjacent=_fine_neighbors[base+1]
+			if adjacent>=0 and _voxels[adjacent]!=0 and visited[adjacent]==0:
+				visited[adjacent]=1
+				queue.append(adjacent)
+			adjacent=_fine_neighbors[base+2]
+			if adjacent>=0 and _voxels[adjacent]!=0 and visited[adjacent]==0:
+				visited[adjacent]=1
+				queue.append(adjacent)
+			adjacent=_fine_neighbors[base+3]
+			if adjacent>=0 and _voxels[adjacent]!=0 and visited[adjacent]==0:
+				visited[adjacent]=1
+				queue.append(adjacent)
+			adjacent=_fine_neighbors[base+4]
+			if adjacent>=0 and _voxels[adjacent]!=0 and visited[adjacent]==0:
+				visited[adjacent]=1
+				queue.append(adjacent)
+			adjacent=_fine_neighbors[base+5]
+			if adjacent>=0 and _voxels[adjacent]!=0 and visited[adjacent]==0:
+				visited[adjacent]=1
+				queue.append(adjacent)
 		result.append({"indices":queue,"flags":flags})
 	return result
 
@@ -2681,13 +3321,13 @@ func _build_fine_mesh(indices: PackedInt32Array, origin: Vector3, membership: Di
 			if adjacent>=0 and _voxels[adjacent]!=0 and (membership.is_empty() or membership.has(adjacent)):
 				continue
 			var p:=_coords(index)
-			var key:int=p[axis]*PALETTE.size()+int(_voxels[index])
+			var key:int=p[axis]*_body_palette().size()+int(_voxels[index])
 			if not layers.has(key): layers[key]={}
 			layers[key][p[u]+p[v]*row]=true
 		for code:int in layers:
 			var mask:Dictionary=layers[code]
-			var layer:int=code/PALETTE.size()
-			var color:Color=PALETTE[code%PALETTE.size()]
+			var layer:int=code/_body_palette().size()
+			var color:Color=_body_palette()[code%_body_palette().size()]
 			for key:int in mask.keys():
 				if not mask.has(key): continue
 				var x:int=key%row
@@ -2726,3 +3366,4 @@ func _build_fine_mesh(indices: PackedInt32Array, origin: Vector3, membership: Di
 				face_count+=1
 	if face_count==0: return null
 	return surface.commit()
+

@@ -14,6 +14,11 @@ const RED := Color(1.0, 0.24, 0.25)
 const PAPER := Color("ede9df")
 const ASH := Color("89918f")
 const VERMILION := Color("e6523e")
+const UI_PAPER := Color("f2ede5")
+const MENU_MUTED := Color("b9b5ae")
+const UI_ACCENT := Color("ff704f")
+const UI_INK := Color("101319")
+const MENU_VOLUME_RECT := Rect2(108, 255, 548, 40)
 const GEAR_COLORS := [Color(0.35, 0.79, 0.76), Color(0.47, 0.94, 0.75), Color(1.0, 0.72, 0.31), Color(1.0, 0.35, 0.26)]
 
 var _snapshot: Dictionary = {}
@@ -202,7 +207,9 @@ func _draw_telemetry() -> void:
 		draw_rect(bar,Color(PAPER,0.13))
 		if index < health: draw_rect(bar,VERMILION if health <= 2 else PAPER)
 	_text(Vector2(36,59),"生命",10,ASH)
-	if bool(_snapshot.get("training",false)):
+	if bool(_snapshot.get("invincible",false)):
+		_text(Vector2(36,81),"无敌 · F6 关闭",12,AMBER)
+	elif bool(_snapshot.get("training",false)):
 		_text(Vector2(36,81),"切割实验场",12,CYAN)
 	elif bool(_snapshot.get("practice",false)):
 		_text(Vector2(36,81),"练习模式",12,AMBER)
@@ -213,6 +220,10 @@ func _draw_telemetry() -> void:
 	var chapter := clampi(int(_snapshot.get("route_section",0)),0,3)
 	var label: String = ["装配区","炉区","高架桥","核心长廊"][chapter]
 	if bool(_snapshot.get("boss",false)): label = "核心守卫"
+	if bool(_snapshot.get("campaign_active",false)):
+		label = "%d / 4 · %s" % [int(_snapshot.get("campaign_level",1)),str(_snapshot.get("series_label","第一系列"))]
+		if str(_snapshot.get("campaign_phase","")) == "boss": label += " · 守关战"
+		elif str(_snapshot.get("campaign_phase","")) == "transition": label += " · 区域过渡"
 	if bool(_snapshot.get("training",false)): label = "自由切割"
 	_text_center(Vector2(640,31),label,12,ASH)
 	draw_rect(Rect2(540,42,200,2),Color(PAPER,0.13))
@@ -333,64 +344,105 @@ func _draw_combat_messages() -> void:
 
 
 func _draw_menu() -> void:
-	var state := str(_snapshot.get("state","menu"))
+	var state := str(_snapshot.get("state", "menu"))
 	var home := _ui_page == "home"
-	# The right half keeps the real combat portrait and highway visible.
-	draw_rect(Rect2(Vector2.ZERO,REFERENCE_SIZE),Color(INK,0.64 if state == "menu" and home else 0.89))
-	for index in range(18):
-		draw_rect(Rect2(float(index)*40,0,40,720),Color(INK,0.34*(1.0-float(index)/18.0)))
-	draw_line(Vector2(96,84),Vector2(132,84),VERMILION,3.0)
-	_text(Vector2(144,89),"SLAY THE HIGHWAY",13,ASH)
-	if not home:
-		var title := "设置" if _ui_page == "settings" else ("怎么杀出这条路" if _ui_page == "controls" else "结束这趟路？")
-		_text(Vector2(92,201),title,48,PAPER)
-		if _ui_page == "settings": _draw_settings_page()
-		elif _ui_page == "controls": _draw_controls_page()
-		else:
-			_text(Vector2(96,270),"确认后将关闭游戏。",20,ASH)
-			_text(Vector2(96,305),"斩过「确认离开」，或按 Esc 返回。",14,ASH)
-	elif state == "menu":
-		_text(Vector2(88,247),"杀路",112,PAPER)
-		_text(Vector2(96,291),"SLAY THE HIGHWAY",23,PAPER)
-		_text(Vector2(96,330),"向前。出刀。",20,ASH)
-		if not bool(_snapshot.get("menu_ready",true)):
-			_text(Vector2(96,356),"场景准备中",12,VERMILION)
+	var title_screen := state == "menu" and home
+	_draw_menu_backdrop(title_screen)
+	if title_screen:
+		draw_line(Vector2(89, 102), Vector2(114, 77), UI_ACCENT, 4.0, true)
+		draw_line(Vector2(106, 102), Vector2(131, 77), Color(UI_ACCENT, 0.34), 2.0, true)
+		_text(Vector2(79, 250), "杀路", 148, UI_PAPER)
+		_text(Vector2(88, 297), "SLAY THE HIGHWAY", 28, UI_PAPER)
+		if not bool(_snapshot.get("menu_ready", true)):
+			_draw_menu_loading()
 	else:
-		var title := "暂停" if state == "paused" else ("断路" if state == "dead" else "突破完成")
-		var subtitle := "PAUSED" if state == "paused" else ("RUN ENDED" if state == "dead" else "HIGHWAY CLEARED")
-		_text(Vector2(92,216),title,72,PAPER)
-		_text(Vector2(96,253),subtitle,17,VERMILION)
-		if state == "paused":
-			_text(Vector2(96,316),"这条路，等你继续。",21,ASH)
-		_draw_result_stats()
+		_text(Vector2(88, 88), "SLAY THE HIGHWAY", 14, MENU_MUTED)
+		match _ui_page:
+			"settings":
+				_text(Vector2(85, 173), "设置", 60, UI_PAPER)
+				_draw_settings_page()
+			"controls":
+				_text(Vector2(85, 173), "操作指南", 60, UI_PAPER)
+				_draw_controls_page()
+			"quit_confirm":
+				_text(Vector2(85, 173), "退出游戏？", 60, UI_PAPER)
+				_text(Vector2(88, 230), "确认后将关闭游戏。", 20, MENU_MUTED)
+			_:
+				var title := "暂停" if state == "paused" else ("行程结束" if state == "dead" else "突破完成")
+				_text(Vector2(84, 215), title, 80, UI_PAPER)
+				_draw_result_stats()
 	_draw_ui_buttons()
 	_draw_menu_split()
 	_draw_menu_trail()
-	_text(Vector2(96,683),"按住左键划过选项  /  点击  /  Enter 确认",12,ASH)
-	_text_right(Vector2(1184,683),"Esc  返回" if not home else ("Esc  继续" if state == "paused" else "杀路"),12,ASH)
+	draw_line(Vector2(88, 650), Vector2(1192, 650), Color(UI_PAPER, 0.22))
+	var hint := "按住左键划过选项，或点击    ·    ↑ ↓  选择    Enter  确认"
+	if _ui_page == "settings":
+		hint = "点击切换    ·    拖动滑块调音量    ·    ← →  调整当前音量"
+	_text(Vector2(88, 680), hint, 15, MENU_MUTED)
+	if not title_screen:
+		var back_hint := "继续" if home and state == "paused" else "返回"
+		_text_right(Vector2(1192, 680), "Esc  " + back_hint, 15, UI_PAPER)
+
+
+func _draw_menu_backdrop(title_screen: bool) -> void:
+	var left := Color(UI_INK, 0.98)
+	var right := Color(UI_INK, 0.13 if title_screen else 0.65)
+	var middle := Color(UI_INK, 0.87 if title_screen else 0.95)
+	var stops := [0.0, 454.0 if title_screen else 670.0, 990.0 if title_screen else 1192.0, REFERENCE_SIZE.x]
+	var colors := [left, middle, right, right]
+	for index in range(stops.size() - 1):
+		var x0: float = stops[index]
+		var x1: float = stops[index + 1]
+		draw_polygon(PackedVector2Array([Vector2(x0, 0), Vector2(x1, 0), Vector2(x1, 720), Vector2(x0, 720)]),
+			PackedColorArray([colors[index], colors[index + 1], colors[index + 1], colors[index]]))
+	draw_rect(Rect2(0, 650, 1280, 70), Color(UI_INK, 0.77))
+
+
+func _draw_menu_loading() -> void:
+	var completed := int(_snapshot.get("warm_completed", 0))
+	var total := int(_snapshot.get("warm_total", 0))
+	var fraction := clampf(float(completed) / float(maxi(total, 1)), 0.0, 1.0)
+	var progress := Rect2(88, 626, 414, 2)
+	draw_rect(progress, Color(UI_PAPER, 0.19))
+	draw_rect(Rect2(progress.position, Vector2(progress.size.x * fraction, progress.size.y)), UI_ACCENT)
+	_text(Vector2(88, 617), "正在准备行程", 14, MENU_MUTED)
+	if total > 0:
+		_text_right(Vector2(502, 617), "%d / %d" % [completed, total], 14, UI_PAPER)
 
 
 func _draw_result_stats() -> void:
-	var state := str(_snapshot.get("state","menu"))
-	var y := 391.0 if state == "paused" else 339.0
-	_text(Vector2(96,y-27),"本次行程",12,ASH)
-	_text(Vector2(92,y+24),"%06d"%int(_snapshot.get("score",0)),49,PAPER)
-	_text(Vector2(96,y+50),"得分",12,ASH)
-	_text(Vector2(96,y+104),"%02d"%int(_snapshot.get("kills",0)),30,PAPER)
-	_text(Vector2(160,y+103),"目标斩断",14,ASH)
-	var time := float(_snapshot.get("time",0))
-	_text(Vector2(96,y+151),"%02d:%02d"%[int(time)/60,int(time)%60],30,PAPER)
-	_text(Vector2(215,y+150),"行程时间",14,ASH)
+	var panel := Rect2(722, 261, 470, 284)
+	draw_colored_polygon(_menu_card_points(panel), Color(UI_INK, 0.88))
+	draw_line(panel.position, panel.position + Vector2(44, 0), UI_ACCENT, 3.0)
+	_text(Vector2(750, 310), "本次得分", 17, MENU_MUTED)
+	_text(Vector2(746, 381), "%06d" % int(_snapshot.get("score", 0)), 60, UI_PAPER)
+	draw_line(Vector2(750, 412), Vector2(1164, 412), Color(UI_PAPER, 0.20))
+	_text(Vector2(750, 450), "目标斩断", 16, MENU_MUTED)
+	_text(Vector2(968, 450), "行程时间", 16, MENU_MUTED)
+	_text(Vector2(750, 503), "%02d" % int(_snapshot.get("kills", 0)), 36, UI_PAPER)
+	var time := int(_snapshot.get("run_time", _snapshot.get("time", 0)))
+	_text(Vector2(968, 503), "%02d:%02d" % [time / 60, time % 60], 36, UI_PAPER)
 
 
 func _draw_controls_page() -> void:
-	var rows := [["鼠标移动","有限转头；长斩时控制刀路"],["左键短按","十二式轻击，连按衔接"],["左键保持 / 拖动","慢动作自由斩切，持续消耗速度"],["右键","振刀；精准抵挡提速，弹药原路反射"],["Shift","持续提速，四档伤害与风险"]]
+	var rows := [
+		["移动鼠标", "转头，长斩时控制刀路"],
+		["轻点左键", "轻击，连续点击可衔接十二式"],
+		["按住左键拖动", "进入慢动作长斩，持续消耗速度"],
+		["右键", "振刀。精准抵挡可提速，反弹的弹药可触发连爆"],
+		["按住 Shift", "提速并切换档位"],
+		["Esc", "暂停或继续"],
+		["F6", "局内切换无敌"],
+	]
 	for index in range(rows.size()):
-		var y := 278.0+float(index)*51.0
-		_text(Vector2(96,y),str(rows[index][0]),17,PAPER)
-		_text(Vector2(330,y),str(rows[index][1]),16,ASH)
-	_text(Vector2(96,553),"自动前进 · 无法换道 · 任意跑道漏敌都会受伤",16,VERMILION)
-	_text(Vector2(96,582),"斩断关键连接；残骸仍可再切。五格生命耗尽时行程结束。",15,ASH)
+		var y := 216.0 + float(index) * 43.0
+		draw_rect(Rect2(88, y, 154, 32), Color(UI_PAPER, 0.09))
+		_text(Vector2(102, y + 22), rows[index][0], 16, UI_PAPER)
+		_text(Vector2(264, y + 22), rows[index][1], 18, MENU_MUTED)
+		if index < rows.size() - 1:
+			draw_line(Vector2(264, y + 36), Vector2(752, y + 36), Color(UI_PAPER, 0.11))
+	_text(Vector2(88, 551), "自动前进，无法换道。漏过地面敌人会受伤，天空敌机持续射击。", 16, UI_PAPER)
+	_text(Vector2(88, 578), "斩断关键连接即可击毁目标，残骸仍可再切。", 16, MENU_MUTED)
 
 
 func _setting(key: String, fallback: Variant) -> Variant:
@@ -399,14 +451,19 @@ func _setting(key: String, fallback: Variant) -> Variant:
 
 
 func _draw_settings_page() -> void:
-	var volume := _ui_volume_preview if _ui_slider_drag else clampf(float(_setting("volume",1.0)),0,1)
-	_text(Vector2(96,280),"主音量",18,PAPER)
-	_text_right(Vector2(672,280),"%d%%"%roundi(volume*100.0),18,ASH)
-	var track := Rect2(96,309,576,4)
-	draw_rect(track,Color(PAPER,0.17))
-	draw_rect(Rect2(track.position,Vector2(track.size.x*volume,track.size.y)),VERMILION)
-	draw_rect(Rect2(92+track.size.x*volume,303,8,16),PAPER)
-	if _ui_focus == 0: draw_line(Vector2(96,329),Vector2(672,329),Color(VERMILION,0.45),1.0)
+	var volume := _ui_volume_preview if _ui_slider_drag else clampf(float(_setting("volume", 1.0)), 0.0, 1.0)
+	var focused := _ui_focus == 0
+	var card := Rect2(88, 204, 588, 100)
+	draw_colored_polygon(_menu_card_points(card), Color(UI_PAPER, 0.11 if focused else 0.06))
+	if focused:
+		draw_rect(Rect2(card.position, Vector2(3, card.size.y)), UI_ACCENT)
+	_text(Vector2(108, 242), "主音量", 21, UI_PAPER)
+	_text_right(Vector2(656, 242), "%d%%" % roundi(volume * 100.0), 21, UI_PAPER)
+	var track := Rect2(MENU_VOLUME_RECT.position.x, MENU_VOLUME_RECT.get_center().y - 2, MENU_VOLUME_RECT.size.x, 4)
+	draw_rect(track, Color(UI_PAPER, 0.22))
+	draw_rect(Rect2(track.position, Vector2(track.size.x * volume, track.size.y)), UI_ACCENT)
+	draw_circle(track.position + Vector2(track.size.x * volume, 2), 7.0, UI_PAPER, true, -1.0, true)
+	_text(Vector2(88, 351), "画面", 17, MENU_MUTED)
 
 
 func _ui_button(action: StringName, label: String, subtitle: String, rect: Rect2, value: Variant = null, kind: String = "button") -> Dictionary:
@@ -418,46 +475,80 @@ func _ui_buttons() -> Array[Dictionary]:
 	var state := str(_snapshot.get("state","menu"))
 	if state == "playing": return buttons
 	if _ui_page == "controls":
-		buttons.append(_ui_button(&"back","返回","BACK",Rect2(940,598,244,48)))
+		buttons.append(_ui_button(&"back", "返回", "", Rect2(968, 579, 224, 54)))
 	elif _ui_page == "settings":
-		buttons.append(_ui_button(&"volume","主音量","",Rect2(88,291,592,40),float(_setting("volume",1.0)),"slider"))
+		buttons.append(_ui_button(&"volume", "主音量", "", MENU_VOLUME_RECT, float(_setting("volume", 1.0)), "slider"))
 		for index in range(3):
-			var action: StringName = [&"fullscreen",&"vsync",&"msaa"][index]
-			var enabled := bool(_setting(str(action),true))
-			var label: String = ["全屏","垂直同步","4× 抗锯齿"][index]
-			buttons.append(_ui_button(action,label,"开启 ON" if enabled else "关闭 OFF",Rect2(96,365+float(index)*70.0,576,50),not enabled))
-		buttons.append(_ui_button(&"back","返回","BACK",Rect2(940,598,244,48)))
+			var action: StringName = [&"fullscreen", &"vsync", &"msaa"][index]
+			var enabled := bool(_setting(str(action), true))
+			var label: String = ["全屏", "垂直同步", "4× 抗锯齿"][index]
+			buttons.append(_ui_button(action, label, "开启" if enabled else "关闭", Rect2(88, 369 + float(index) * 64.0, 588, 54), not enabled, "toggle"))
+		buttons.append(_ui_button(&"back", "返回", "", Rect2(968, 579, 224, 54)))
 	elif _ui_page == "quit_confirm":
-		buttons.append(_ui_button(&"quit","确认离开","QUIT GAME",Rect2(96,386,380,54)))
-		buttons.append(_ui_button(&"back","留在这里","BACK",Rect2(96,458,380,54)))
+		buttons.append(_ui_button(&"quit", "确认退出", "", Rect2(88, 292, 414, 58)))
+		buttons.append(_ui_button(&"back", "取消", "", Rect2(88, 364, 414, 52)))
 	elif state == "menu":
-		buttons.append(_ui_button(&"start","斩入公路","START",Rect2(96,386,380,54)))
-		buttons.append(_ui_button(&"settings","设置","OPTIONS",Rect2(96,448,380,48)))
-		buttons.append(_ui_button(&"controls","操作","CONTROLS",Rect2(96,506,380,48)))
-		buttons.append(_ui_button(&"quit_confirm","离开","QUIT",Rect2(96,564,380,48)))
+		buttons.append(_ui_button(&"start", "开始游戏", "", Rect2(88, 344, 414, 62), null, "primary"))
+		buttons.append(_ui_button(&"settings", "设置", "", Rect2(88, 420, 414, 51)))
+		buttons.append(_ui_button(&"controls", "操作指南", "", Rect2(88, 481, 414, 51)))
+		buttons.append(_ui_button(&"quit_confirm", "退出", "", Rect2(88, 542, 414, 51)))
 	else:
-		var actions: Array = [&"resume",&"restart",&"settings",&"controls",&"menu"] if state == "paused" else [&"restart",&"settings",&"controls",&"menu"]
-		var labels := {"resume":["继续杀路","RESUME"],"restart":["重新开始","RESTART"],"settings":["设置","OPTIONS"],"controls":["操作","CONTROLS"],"menu":["返回标题","TITLE"]}
+		var actions := [&"resume", &"restart", &"settings", &"controls", &"menu"] if state == "paused" else [&"restart", &"settings", &"controls", &"menu"]
+		var labels := {&"resume": "继续游戏", &"restart": "重新开始", &"settings": "设置", &"controls": "操作指南", &"menu": "返回标题"}
 		for index in range(actions.size()):
 			var action: StringName = actions[index]
-			buttons.append(_ui_button(action,str(labels[str(action)][0]),str(labels[str(action)][1]),Rect2(850,286+float(index)*63,334,50)))
+			var kind := "primary" if index == 0 else "button"
+			buttons.append(_ui_button(action, labels[action], "", Rect2(88, 261 + float(index) * 64, 414, 54), null, kind))
 	return buttons
+
+
+func _menu_card_points(rect: Rect2) -> PackedVector2Array:
+	return PackedVector2Array([
+		rect.position, Vector2(rect.end.x - 13, rect.position.y), Vector2(rect.end.x, rect.position.y + 13),
+		rect.end, Vector2(rect.position.x, rect.end.y),
+	])
 
 
 func _draw_ui_buttons() -> void:
 	var buttons := _ui_buttons()
 	for index in range(buttons.size()):
 		var button: Dictionary = buttons[index]
-		if str(button.kind) == "slider": continue
+		var kind := str(button.kind)
+		if kind == "slider":
+			continue
 		var rect: Rect2 = button.rect
-		if not _ui_split.is_empty() and _ui_split.rect == rect and float(_ui_split.age)<0.24: continue
+		if not _ui_split.is_empty() and _ui_split.rect == rect:
+			continue
 		var selected := index == _ui_focus
-		var accent: Color = VERMILION if selected else ASH
-		draw_rect(rect,Color(PAPER,0.055 if selected else 0.018))
-		draw_line(rect.position+Vector2(0,rect.size.y),rect.end,Color(accent,0.6 if selected else 0.26),1.0)
-		if selected: draw_line(rect.position,rect.position+Vector2(0,rect.size.y),VERMILION,3.0)
-		_text(rect.position+Vector2(17,rect.size.y*0.5+7),str(button.label),21,PAPER)
-		_text_right(rect.position+Vector2(rect.size.x-16,rect.size.y*0.5+4),str(button.subtitle),11,accent)
+		var primary := kind == "primary"
+		var filled := primary and selected
+		var label_color := UI_INK if filled else UI_PAPER
+		var fill := Color(UI_PAPER, 0.15 if selected else 0.065)
+		if primary:
+			fill = UI_ACCENT if filled else Color(UI_ACCENT, 0.22)
+		draw_colored_polygon(_menu_card_points(rect), fill)
+		if selected and not filled:
+			draw_rect(Rect2(rect.position, Vector2(3, rect.size.y)), UI_ACCENT)
+		if not filled:
+			var border := Color(UI_ACCENT, 0.68) if primary else Color(UI_PAPER, 0.15)
+			draw_line(Vector2(rect.position.x, rect.end.y), rect.end, border)
+		_text(rect.position + Vector2(20, rect.size.y * 0.5 + 8), str(button.label), 24 if primary else 20, label_color)
+		if kind == "toggle":
+			_draw_menu_toggle(rect, not bool(button.value), str(button.subtitle))
+		else:
+			var arrow := rect.get_center() + Vector2(rect.size.x * 0.5 - 30, 0)
+			var direction := -1.0 if str(button.action) == "back" else 1.0
+			var arrow_color := label_color if filled else (UI_ACCENT if selected else MENU_MUTED)
+			draw_polyline(PackedVector2Array([arrow + Vector2(-4 * direction, -6), arrow + Vector2(3 * direction, 0), arrow + Vector2(-4 * direction, 6)]), arrow_color, 2.0, true)
+
+
+func _draw_menu_toggle(rect: Rect2, enabled: bool, label: String) -> void:
+	var center := Vector2(rect.end.x - 42, rect.get_center().y)
+	var rail := Rect2(center - Vector2(20, 9), Vector2(40, 18))
+	draw_rect(rail, Color(UI_ACCENT, 0.30) if enabled else Color(UI_PAPER, 0.13))
+	var thumb_x := rail.end.x - 15 if enabled else rail.position.x + 3
+	draw_rect(Rect2(thumb_x, rail.position.y + 3, 12, 12), UI_ACCENT if enabled else MENU_MUTED)
+	_text_right(Vector2(rail.position.x - 12, center.y + 6), label, 16, UI_PAPER if enabled else MENU_MUTED)
 
 
 func _half_polygon(points: PackedVector2Array, origin: Vector2, normal: Vector2, sign_value: float) -> PackedVector2Array:
@@ -479,28 +570,28 @@ func _draw_menu_split() -> void:
 	var progress := clampf(age/0.24,0,1)
 	var normal: Vector2 = _ui_split.normal
 	var origin: Vector2 = _ui_split.origin
-	var corners := PackedVector2Array([rect.position,Vector2(rect.end.x,rect.position.y),rect.end,Vector2(rect.position.x,rect.end.y)])
+	var corners := _menu_card_points(rect)
 	for side: float in [-1.0,1.0]:
 		var polygon := _half_polygon(corners,origin,normal,side)
 		if polygon.size()<3: continue
 		var offset := normal*side*(3.0+progress*18.0)+Vector2(progress*3.0,progress*progress*8.0)
 		for index in range(polygon.size()): polygon[index]+=offset
-		draw_colored_polygon(polygon,Color(PAPER,(1.0-progress)*0.14))
+		draw_colored_polygon(polygon,Color(UI_ACCENT,(1.0-progress)*0.25))
 		var outline := polygon.duplicate()
 		outline.append(polygon[0])
-		draw_polyline(outline,Color(PAPER,(1.0-progress)*0.6),1.0,true)
+		draw_polyline(outline,Color(UI_PAPER,(1.0-progress)*0.6),1.0,true)
 	var text_offset := normal*(1.0 if (rect.get_center()-origin).dot(normal)>=0 else -1.0)*progress*18.0
-	_text(rect.position+Vector2(17,rect.size.y*0.5+7)+text_offset,str(_ui_split.label),21,Color(PAPER,1.0-progress))
+	_text(rect.position+Vector2(20,rect.size.y*0.5+8)+text_offset,str(_ui_split.label),20,Color(UI_PAPER,1.0-progress))
 	var direction := Vector2(-normal.y,normal.x)
 	var half := maxf(rect.size.x,rect.size.y)*0.65
-	draw_line(origin-direction*half,origin+direction*half,Color(PAPER,maxf(0,1.0-age/0.12)),2.2,true)
+	draw_line(origin-direction*half,origin+direction*half,Color(UI_PAPER,maxf(0,1.0-age/0.12)),2.2,true)
 
 
 func _draw_menu_trail() -> void:
 	for index in range(1,_ui_trail.size()):
 		var entry: Dictionary = _ui_trail[index]
 		var alpha := clampf(1.0-float(entry.age)/0.16,0,1)
-		draw_line(_ui_trail[index-1].point,entry.point,Color(PAPER,alpha*0.85),1.6+alpha*1.5,true)
+		draw_line(_ui_trail[index-1].point,entry.point,Color(UI_PAPER,alpha*0.85),1.6+alpha*1.5,true)
 
 
 func _panel(rectangle: Rect2, alpha: float) -> void:
@@ -578,7 +669,7 @@ func _segment_rect_entry(from: Vector2, to: Vector2, rect: Rect2) -> float:
 
 
 func _set_menu_volume(point: Vector2) -> void:
-	_ui_volume_preview = clampf((point.x-96.0)/576.0,0,1)
+	_ui_volume_preview = clampf((point.x - MENU_VOLUME_RECT.position.x) / MENU_VOLUME_RECT.size.x, 0.0, 1.0)
 	ui_action.emit(&"volume",_ui_volume_preview)
 
 
@@ -722,4 +813,4 @@ func _dispatch_ui_action(action: StringName, value: Variant) -> void:
 
 
 func get_ui_debug_state() -> Dictionary:
-	return {"page":_ui_page,"state":str(_snapshot.get("state","menu")),"reference_size":REFERENCE_SIZE,"buttons":_ui_buttons(),"gesture_pressed":_ui_pressed,"gesture_consumed":_ui_consumed,"must_release":_ui_must_release,"gesture_distance":_ui_distance,"action_count":_ui_action_count,"last_action":_ui_last_action,"last_activation_kind":_ui_last_activation_kind,"pending_action":_ui_pending.get("action",""),"pending_age":_ui_pending.get("age",-1.0),"split_age":_ui_split.get("age",-1.0),"split_duration":0.24,"activation_delay":0.14,"focus":_ui_focus,"pointer":_ui_pointer,"volume_slider_rect":Rect2(88,291,592,40),"slider_dragging":_ui_slider_drag,"menu_ready":bool(_snapshot.get("menu_ready",true))}
+	return {"page":_ui_page,"state":str(_snapshot.get("state","menu")),"reference_size":REFERENCE_SIZE,"buttons":_ui_buttons(),"gesture_pressed":_ui_pressed,"gesture_consumed":_ui_consumed,"must_release":_ui_must_release,"gesture_distance":_ui_distance,"action_count":_ui_action_count,"last_action":_ui_last_action,"last_activation_kind":_ui_last_activation_kind,"pending_action":_ui_pending.get("action",""),"pending_age":_ui_pending.get("age",-1.0),"split_age":_ui_split.get("age",-1.0),"split_duration":0.24,"activation_delay":0.14,"focus":_ui_focus,"pointer":_ui_pointer,"volume_slider_rect":MENU_VOLUME_RECT,"slider_dragging":_ui_slider_drag,"menu_ready":bool(_snapshot.get("menu_ready",true))}

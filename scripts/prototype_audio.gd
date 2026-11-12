@@ -3,7 +3,8 @@ extends Node
 
 const SAMPLE_RATE := 44100
 const VOICES := 24
-const EVENT_NAMES := ["slash", "unsheathe", "blade_whoosh", "sheathe", "guard_raise", "guard_release", "hit", "kill", "parry", "perfect", "hurt", "gear", "start", "win", "lose", "windup", "enemy_swing", "ranged_charge", "ranged_fire", "boss_charge", "parry_clash", "explosion", "explosion_reflected"]
+const BOSS_ENTRY_EVENTS := ["entry_ink", "entry_cyber", "entry_sea", "entry_empire"]
+const EVENT_NAMES := ["slash", "unsheathe", "blade_whoosh", "sheathe", "guard_raise", "guard_release", "hit", "kill", "parry", "perfect", "hurt", "gear", "start", "win", "lose", "windup", "enemy_swing", "ranged_charge", "ranged_fire", "boss_charge", "parry_clash", "explosion", "explosion_reflected", "flyby", "carrier_engine", "boss_release", "heavy_land", "boss_ink_break", "boss_cyber_arc", "boss_sea_rupture", "boss_ship_collapse"]
 
 var _sounds: Dictionary = {}
 var _players: Array[AudioStreamPlayer] = []
@@ -30,7 +31,7 @@ var _runner_cue_duck := 0.0
 
 
 func _ready() -> void:
-	for event_name in EVENT_NAMES:
+	for event_name in EVENT_NAMES+BOSS_ENTRY_EVENTS:
 		_sounds[event_name] = _synthesize(event_name)
 	for index in range(VOICES):
 		var player := AudioStreamPlayer.new()
@@ -92,6 +93,11 @@ func play_event(kind: String, intensity: float = 1.0) -> void:
 		"enemy_swing", "ranged_fire": minimum_gap = 35
 		"parry_clash": minimum_gap = 35
 		"explosion", "explosion_reflected": minimum_gap = 40
+		"flyby": minimum_gap = 150
+		"carrier_engine": minimum_gap = 1600
+		"boss_release", "heavy_land": minimum_gap = 120
+		"boss_ink_break", "boss_cyber_arc", "boss_sea_rupture", "boss_ship_collapse": minimum_gap = 250
+		"entry_ink", "entry_cyber", "entry_sea", "entry_empire": minimum_gap = 150
 	if now - int(_last_event_msec.get(kind, -100000)) < minimum_gap:
 		return
 	_last_event_msec[kind] = now
@@ -108,6 +114,9 @@ func play_event(kind: String, intensity: float = 1.0) -> void:
 		"windup", "enemy_swing", "ranged_charge", "ranged_fire", "boss_charge": pool = Vector2i(10, 2)
 		"unsheathe", "sheathe", "guard_raise", "guard_release": pool = Vector2i(12, 3)
 		"slash", "blade_whoosh": pool = Vector2i(15, 5)
+		"flyby", "carrier_engine", "boss_release": pool = Vector2i(20, 2)
+		"heavy_land": pool = Vector2i(4, 3)
+		"boss_ink_break", "boss_cyber_arc", "boss_sea_rupture", "boss_ship_collapse": pool = Vector2i(20, 2)
 	var cursor: int = int(_voice_cursors.get(pool.x, 0))
 	var voice: int = pool.x + cursor % pool.y
 	for offset in range(pool.y):
@@ -131,6 +140,15 @@ func play_event(kind: String, intensity: float = 1.0) -> void:
 	elif kind == "explosion_reflected":
 		player.volume_db += 2.0
 		player.pitch_scale = 0.92 + intensity * 0.025 + variation
+	elif kind == "carrier_engine":
+		player.volume_db -= 4.0
+		player.pitch_scale = 0.90
+	elif kind == "heavy_land":
+		player.volume_db += 2.0
+		_runner_cue_duck = 0.65
+	elif kind in BOSS_ENTRY_EVENTS:
+		player.volume_db += 3.0
+		_runner_cue_duck = 0.85
 	elif kind in ["slash", "blade_whoosh"]:
 		player.volume_db -= 4.0 if intensity <= 0.55 else 2.0
 	elif kind in ["unsheathe", "sheathe", "guard_raise", "guard_release"]:
@@ -337,6 +355,18 @@ func _synthesize(kind: String) -> AudioStreamWAV:
 		"parry_clash": duration = 0.32
 		"explosion": duration = 0.55
 		"explosion_reflected": duration = 0.72
+		"flyby": duration = 1.15
+		"carrier_engine": duration = 3.6
+		"boss_release": duration = 0.85
+		"heavy_land": duration = 1.10
+		"boss_ink_break": duration = 1.30
+		"boss_cyber_arc": duration = 1.20
+		"boss_sea_rupture": duration = 1.45
+		"boss_ship_collapse": duration = 1.70
+		"entry_ink": duration = 1.22
+		"entry_cyber": duration = 1.16
+		"entry_sea": duration = 1.55
+		"entry_empire": duration = 2.05
 	_random.seed = int(kind.hash())
 	var count := int(duration * SAMPLE_RATE)
 	var bytes := PackedByteArray()
@@ -354,12 +384,59 @@ func _synthesize(kind: String) -> AudioStreamWAV:
 		var grit := noise - previous_noise
 		previous_noise = noise
 		var envelope := sin(minf(phase * 28.0, PI * 0.5)) * pow(1.0 - phase, 2.1)
-		if kind in ["slash", "blade_whoosh", "unsheathe", "sheathe", "guard_raise", "guard_release", "hit", "kill", "parry", "perfect", "parry_clash", "explosion", "explosion_reflected"]:
+		if kind in ["slash", "blade_whoosh", "unsheathe", "sheathe", "guard_raise", "guard_release", "hit", "kill", "parry", "perfect", "parry_clash", "explosion", "explosion_reflected", "flyby", "carrier_engine", "boss_release", "heavy_land"]:
 			# The transient and metallic/air tails already have independent envelopes.
 			# Only soften the sample boundary, rather than burying the initial contact.
 			envelope = minf(t / 0.0008, 1.0) * smoothstep(0.0, 0.026, duration - t)
 		var sample := 0.0
 		match kind:
+			"entry_ink":
+				var resonance := sin(TAU*(89.0*t+31.0*t*t))*0.64+sin(TAU*(178.0*t+62.0*t*t))*0.25
+				var steel := sin(TAU*1643.0*t)*exp(-absf(t-0.42)*11.0)
+				sample = resonance*(0.35+0.65*phase)+steel*0.30+air_noise*0.45
+			"entry_cyber":
+				var piston := exp(-pow((t-0.10)/0.035,2.0))+exp(-pow((t-0.30)/0.056,2.0))*0.86
+				var motor := sin(TAU*(87.0*t+70.0*t*t))*0.54+sin(TAU*185.0*t)*0.22
+				sample = motor*(0.32+0.68*piston)+grit*piston*0.45+low_noise*0.70
+			"entry_sea":
+				var swell := exp(-pow((t-0.53)/0.32,2.0))
+				var pressure := sin(TAU*(42.0*t+19.0*t*t))*0.9+sin(TAU*69.0*t)*0.28
+				sample = (pressure+air_noise*1.25+low_noise*2.2)*swell
+			"entry_empire":
+				var drive := sin(TAU*(32.0*t+13.0*t*t))*0.9+sin(TAU*(64.0*t+26.0*t*t))*0.40
+				var brake := sin(TAU*(129.0*t+32.0*t*t))*exp(-pow((t-0.82)/0.31,2.0))*0.42
+				sample = (drive+brake+low_noise*1.6+air_noise*0.55)*smoothstep(0.0,0.35,t)
+			"boss_ink_break":
+				var ring := sin(TAU*741.0*t)*exp(-t*4.6)+sin(TAU*1198.0*t)*exp(-t*6.1)*0.35
+				var paper := air_noise*exp(-pow((t-0.24)/0.19,2.0))*0.75
+				sample = ring*0.58+paper+grit*exp(-t*85.0)*0.9
+			"boss_cyber_arc":
+				var falling := sin(TAU*(270.0*t-92.0*t*t))*exp(-t*3.0)*0.45
+				var arc := air_noise*pow(maxf(0.0,sin(TAU*23.0*t)),8.0)*exp(-t*3.5)
+				sample = falling+arc*1.5+low_noise*exp(-t*5.0)*1.6
+			"boss_sea_rupture":
+				var pressure := sin(TAU*(43.0*t+0.5*(1.0-exp(-t*12.0))))*exp(-t*3.6)
+				var spray := air_noise*exp(-pow((t-0.32)/0.26,2.0))*1.5
+				sample = pressure*0.9+spray+low_noise*exp(-t*2.9)*1.7
+			"boss_ship_collapse":
+				var bass := sin(TAU*29.0*t)*exp(-t*2.0)+sin(TAU*47.0*t)*exp(-t*3.3)*0.45
+				var cascade := grit*(exp(-pow((t-0.05)/0.03,2.0))+exp(-pow((t-0.25)/0.07,2.0))+exp(-pow((t-0.58)/0.12,2.0)))
+				sample = bass*1.0+low_noise*exp(-t*1.8)*2.1+cascade*0.85
+			"flyby":
+				var pass_env: float = exp(-pow((phase-0.24)/0.19,2.0))
+				var turbine: float = sin(TAU*(130.0*t+180.0*t*t-105.0*t*t*t))
+				sample = (air_noise*1.8+turbine*0.45+low_noise*0.75)*pass_env
+			"carrier_engine":
+				var engine_env: float = smoothstep(0.0,0.6,t)*smoothstep(0.0,0.7,duration-t)
+				var engine: float = sin(TAU*39.0*t)*0.40+sin(TAU*58.4*t)*0.24+sin(TAU*117.0*t)*0.10
+				sample = (engine+low_noise*1.6+air_noise*0.22)*(0.86+0.14*sin(TAU*7.0*t))*engine_env
+			"boss_release":
+				var latch: float = sin(TAU*840.0*t)*exp(-t*11.0)+sin(TAU*1297.0*t)*exp(-t*17.0)*0.55
+				sample = latch*0.52+grit*exp(-t*60.0)*0.8+low_noise*exp(-t*5.0)*0.7
+			"heavy_land":
+				var ground: float = sin(TAU*(34.0*t+1.1*(1.0-exp(-t*30.0))))*exp(-t*4.8)
+				var steel: float = sin(TAU*173.0*t)*exp(-t*12.0)*0.30+sin(TAU*547.0*t)*exp(-t*20.0)*0.16
+				sample = ground*1.5+steel+grit*exp(-t*120.0)*1.05+low_noise*exp(-t*3.8)*1.4
 			"slash", "blade_whoosh":
 				# Air belongs to blade velocity, not every input packet or impact.
 				# No metallic click / pitched chirp is hidden inside the air layer.

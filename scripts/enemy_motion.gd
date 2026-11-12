@@ -4,6 +4,142 @@ extends RefCounted
 const STANCE_FRACTION := 0.6
 const SWING_FRACTION := 1.0 - STANCE_FRACTION
 const LENGTH_EPSILON := 0.000001
+const FLYBY_ENTRY_TIME_SCALE := 2.0/3.0
+const GROUND_ENTRY_EXTRA_DEPTH := 30.0
+const GROUND_ENTRY_FADE_END_PHASE := 0.42
+# Authored blade-tip / hammer-base vertices, rotated about their real shoulder
+# pivots, sit 1mm above the bind sole plane during the held contact poses.
+const ENTRY_SLASHER_DRAG_PITCH := 1.0293675
+const ENTRY_TANK_PLANT_PITCH := 0.8153234
+
+
+# Ground samples are root-relative. The owner supplies the aircraft world
+# fly-by and transport drop while sharing these durations and part phases.
+static func entry_duration(kind: String) -> float:
+	match kind:
+		"normal": return 2.20
+		"tank": return 2.50
+		"ranged": return 2.30
+		"drone": return 3.20*FLYBY_ENTRY_TIME_SCALE
+		"missile_drone": return 3.60*FLYBY_ENTRY_TIME_SCALE
+		"shield_drone": return 3.60*FLYBY_ENTRY_TIME_SCALE
+		"interceptor": return 2.80*FLYBY_ENTRY_TIME_SCALE
+		"mine_layer": return 3.80*FLYBY_ENTRY_TIME_SCALE
+		"boss": return 6.00
+	return 0.0
+
+
+static func sample_entry(kind: String, _lane: int, phase: float) -> Dictionary:
+	var p: float = clampf(phase,0.0,1.0)
+	if p >= 1.0 or entry_duration(kind) <= 0.0:
+		return {"offset":Vector3.ZERO,"rotation":Vector3.ZERO}
+	var offset: Vector3 = Vector3.ZERO
+	var angles: Vector3 = Vector3.ZERO
+	match kind:
+		"normal":
+			var slide: float = smoothstep(0.0,0.34,p)
+			var launch: float = smoothstep(0.52,0.82,p)
+			var guard: float = smoothstep(0.82,1.0,p)
+			offset = Vector3(lerpf(1.6,0.10,slide)*(1.0-launch),0,lerpf(-5.5,-0.8,slide)*(1.0-launch))
+			angles.y = lerpf(0.85,-0.65,launch)*(1.0-guard)
+		"tank":
+			var leap: float = smoothstep(0.02,0.20,p)
+			var land: float = smoothstep(0.25,0.38,p)
+			var extract: float = smoothstep(0.58,0.84,p)
+			offset = Vector3(0.25*(1.0-land),1.60*leap*(1.0-land),-4.6*(1.0-smoothstep(0.0,0.38,p)))
+			angles.y = 0.18*(1.0-extract)
+		"ranged":
+			var brake: float = smoothstep(0.0,0.30,p)
+			var lock: float = smoothstep(0.70,1.0,p)
+			offset = Vector3(1.8*(1.0-brake),0,lerpf(-5.0,-0.45,brake)*(1.0-lock))
+			angles.y = lerpf(0.95,0.32,brake)*(1.0-lock)
+		_:
+			# The owner supplies the complete behind-camera fly-by and turn,
+			# or the transport ship's suspended Boss drop. Never stack a second
+			# descent/turn here. Part poses still use the same phase below.
+			pass
+	if kind in ["normal","tank","ranged"]:
+		# Reach the original contact position before the brace/scan holds:
+		# the extra distant approach must not slide planted hammers forward.
+		var stop: float = 0.38 if kind == "tank" else (0.30 if kind == "ranged" else 0.34)
+		offset.z -= GROUND_ENTRY_EXTRA_DEPTH*(1.0-smoothstep(0.0,stop,p))
+	return {"offset":offset,"rotation":angles}
+
+
+static func entry_visibility(kind: String, phase: float) -> float:
+	if kind not in ["normal","tank","ranged"]: return 1.0
+	return smoothstep(0.0,GROUND_ENTRY_FADE_END_PHASE,clampf(phase,0.0,1.0))
+
+
+# Deliberate held poses, not a continuous idle sway. All coordinates remain
+# offsets of the original rigid parts; the existing leg solver preserves the
+# actual hip/knee/ankle connections and never scales occupied material.
+static func sample_entry_body(kind: String, lane: int, phase: float, run_phase: float, boss_side: float = 1.0) -> Dictionary:
+	var p: float = clampf(phase,0.0,1.0)
+	var side: float = -1.0 if posmod(lane,2)==0 else 1.0
+	var stride: float = sin(run_phase)
+	var run_angles: Vector3 = Vector3(0.035,sin(run_phase*0.5)*0.045,stride*0.018)
+	var run_right: Vector3 = Vector3(stride*0.20,0,-0.12)
+	var run_left: Vector3 = Vector3(-stride*0.22,0,0.12)
+	var angles: Vector3 = run_angles
+	var offset: Vector3 = Vector3.ZERO
+	var right: Vector3 = run_right
+	var left: Vector3 = run_left
+	var left_foot: Vector3 = Vector3.ZERO
+	var right_foot: Vector3 = Vector3.ZERO
+	var feet_blend: float = 0.0
+	match kind:
+		"normal":
+			var rise: float = smoothstep(0.52,0.84,p)
+			var ready: float = smoothstep(0.84,1.0,p)
+			var drag: float = 1.0-rise
+			var draw: float = rise*(1.0-ready)
+			angles = Vector3(0,side*0.10,0)*drag+Vector3(0.10,-side*0.75,0)*draw+run_angles*ready
+			offset.y = -0.55*drag-0.08*draw
+			var draw_arm: Vector3 = Vector3(ENTRY_SLASHER_DRAG_PITCH,-0.12,-0.10).lerp(Vector3(-0.35,0.12,-0.90),rise)
+			# Lift/turn the blade clear before lowering the shoulder pitch. A
+			# direct angle blend would briefly drive the long tip through deck.
+			draw_arm.x = lerpf(ENTRY_SLASHER_DRAG_PITCH,-0.35,smoothstep(0.45,1.0,rise))
+			right = draw_arm.lerp(run_right,ready)
+			left = Vector3(-0.65,0.10,0.70)*drag+Vector3(-0.35,0,-0.40)*draw+run_left*ready
+			left_foot = Vector3(-0.10,0,0.22)*drag+Vector3(0.05,0.08,-0.18)*draw
+			right_foot = Vector3(0.04,0.02,-0.38)*drag+Vector3(0.04,0,0.28)*draw
+			feet_blend = 1.0-ready
+		"tank":
+			var land: float = smoothstep(0.25,0.38,p)
+			var extract: float = smoothstep(0.58,0.82,p)
+			var ready: float = smoothstep(0.82,1.0,p)
+			var air: float = 1.0-land
+			angles = Vector3(0.06*air,0,0).lerp(run_angles,ready)
+			offset.y = (-0.22*air-0.42*land*(1.0-extract)-0.12*extract)*(1.0-ready)
+			right = Vector3(1.65,0,-0.25).lerp(Vector3(ENTRY_TANK_PLANT_PITCH,0,-0.06),land).lerp(Vector3(1.15,0,-0.50),extract).lerp(run_right,ready)
+			left = Vector3(1.65,0,0.25).lerp(Vector3(ENTRY_TANK_PLANT_PITCH,0,0.06),land).lerp(Vector3(1.15,0,0.50),extract).lerp(run_left,ready)
+			left_foot = Vector3(-0.18,0.25*air,0.05)
+			right_foot = Vector3(0.18,0.25*air,-0.05)
+			feet_blend = 1.0-ready
+		"ranged":
+			var ready: float = smoothstep(0.70,1.0,p)
+			angles = Vector3(0,side*0.30,0).lerp(run_angles,ready)
+			offset.y = -0.24*(1.0-ready)
+			right = Vector3(0.28,0,-0.12).lerp(run_right,ready)
+			left = Vector3(0.22,0,0.15).lerp(run_left,ready)
+			left_foot = Vector3(-0.10,0,0.25)
+			right_foot = Vector3(0.10,0,-0.25)
+			feet_blend = 1.0-ready
+		"boss":
+			var suspended: float = 1.0-smoothstep(0.56,0.72,p)
+			var impact: float = smoothstep(0.72,0.755,p)
+			var rise: float = smoothstep(0.88,1.0,p)
+			var load: float = impact*(1.0-rise)
+			var display: float = smoothstep(0.88,0.94,p)*(1.0-smoothstep(0.96,1.0,p))
+			angles = Vector3(0.08,0,0)*suspended+Vector3(0.22,0,0)*load+Vector3(0.16,boss_side*0.28,0)*rise
+			offset.y = -0.62*load-0.12*rise
+			right = Vector3(0.80,0,-0.65)*suspended+Vector3(0.75,0,-0.30)*load+Vector3(-0.65,0,0.18)*rise+Vector3(0,0,-0.65)*display
+			left = Vector3(0.80,0,0.65)*suspended+Vector3(0.75,0,0.30)*load+Vector3(0.18,0,0.22)*rise+Vector3(0,0,0.65)*display
+			left_foot = Vector3(-0.15,0.80,-0.45)*suspended+Vector3(-0.18,0,0.14)*load
+			right_foot = Vector3(0.15,0.80,-0.45)*suspended+Vector3(0.18,0,0.14)*load
+			feet_blend = 1.0
+	return {"angles":angles,"offset":offset,"left_arm":left,"right_arm":right,"left_foot":left_foot,"right_foot":right_foot,"feet_blend":feet_blend}
 
 
 # distance is a travelled-distance phase, not time. One complete cycle spans
@@ -137,6 +273,11 @@ static func _perpendicular(direction: Vector3) -> Vector3:
 	return (reference - direction * reference.dot(direction)).normalized()
 
 
+static func flyer_entry_weights(phase: float) -> Vector2:
+	var p: float = clampf(phase,0.0,1.0)
+	return Vector2(1.0-smoothstep(0.40,0.52,p),smoothstep(0.48,0.62,p)*(1.0-smoothstep(0.82,1.0,p)))
+
+
 # The three space-shooter archetypes keep their actual launch hardware posed
 # with the cell body. Time is the enemy's world age, so pause, hit-stop and
 # long-slash slow motion cannot leave the wings or recoil running separately.
@@ -158,7 +299,13 @@ static func sample_space_flyer(kind: String, time: float, lane: int, action: Str
 	var bank := (0.075 if kind == "interceptor" else 0.025)*sin(time*1.9+float(lane)*0.4)*(1.0-aim)
 	var angles := Vector3(-0.12*aim-0.08*kick,0.025*sin(time*1.5),bank)
 	var offset := Vector3(0,hover,-0.14*kick)
-	if action == "windup":
+	var entry_weights: Vector2 = flyer_entry_weights(p) if action == "entry" else Vector2.ZERO
+	var entry_fold: float = entry_weights.x
+	var entry_brake: float = entry_weights.y
+	if action == "entry":
+		var entry_side: float = -1.0 if posmod(lane,2)==0 else 1.0
+		angles += Vector3(0.12*entry_fold-0.18*entry_brake,entry_side*0.16*entry_brake,entry_side*(0.18*entry_fold-0.22*entry_brake))
+	elif action == "windup":
 		var ready := smoothstep(0.0,0.85,p)
 		angles.x = -0.28*ready
 		offset += Vector3(0,0.11*ready,-0.19*ready)
@@ -188,17 +335,25 @@ static func sample_space_flyer(kind: String, time: float, lane: int, action: Str
 				if action == "ranged_fire": shield_open = 1.0
 				elif action == "recover": shield_open = 1.0-smoothstep(0.65,1.0,p)
 				wing_angles = Vector3(0,side*(0.025+0.525*shield_open),side*0.018*sin(time*2.2))
+				# Arrival keeps the actual shield leaves closed; their idle hinge
+				# motion returns only as the craft finishes levelling out.
+				if action == "entry":
+					wing_angles.x += -0.18*entry_fold+0.20*entry_brake
+					wing_angles.z = wing_angles.z*(1.0-entry_fold)+side*(-0.20*entry_fold+0.22*entry_brake)
 			"interceptor":
 				hinge = Vector3(side*0.28,2.16,-0.13)
 				wing_angles = Vector3(-0.06*aim,side*0.04*aim,side*(0.11*aim+0.03*sin(time*3.7)))
+				wing_angles += Vector3(-0.30,side*0.12,-side*0.58)*entry_fold+Vector3(0.20,side*0.16,side*0.40)*entry_brake
 			_:
 				hinge = Vector3(side*0.40,2.16,-0.17)
 				wing_angles = Vector3(-0.10*aim,0,side*(0.09*aim+0.012*sin(time*2.0)))
+				wing_angles += Vector3(-0.25,0,-side*0.40)*entry_fold+Vector3(0.18,side*0.10,side*0.28)*entry_brake
 		var wing_basis := Basis.from_euler(wing_angles)
 		parts[part] = Transform3D(wing_basis,hinge-wing_basis*hinge)
 	if kind == "mine_layer":
 		var hinge := Vector3(0,1.86,0.15)
 		var hatch_basis := Basis(Vector3.RIGHT,0.18*aim)
+		if action == "entry": hatch_basis = Basis(Vector3.RIGHT,0.24*entry_brake)
 		parts[3] = Transform3D(hatch_basis,hinge-hatch_basis*hinge)
 	return {"rig":Transform3D(basis,pivot-basis*pivot+offset),"parts":parts,"charge":charge,"kick":kick}
 

@@ -112,17 +112,173 @@ func _reflect_shot(kind: String) -> void:
 	expect(node.global_position.distance_to(before + reflected * 0.1) < 0.001, kind + " reflected flight remains a straight continuation")
 
 
+func _chain_shot(kind: String, point: Vector3, velocity: Vector3, reflected: bool = false) -> Dictionary:
+	var node: Node3D = game._spawn_projectile(point,kind)
+	if node == null: return {}
+	var shot: Dictionary = game.projectiles.back()
+	shot.velocity = velocity
+	shot.reflected = reflected
+	if reflected: node.set_reflected()
+	return shot
+
+
+func _chain_explosions() -> Array:
+	var result: Array = []
+	for event: Dictionary in game.combat_events:
+		if str(event.event)=="projectile_explosion": result.append(event)
+	return result
+
+
+func _verify_relative_interception() -> void:
+	_reset()
+	var returned: Dictionary = _chain_shot("bolt",Vector3(0,1.65,-5),Vector3(0,0,-100),true)
+	var hostile: Dictionary = _chain_shot("missile",Vector3(0,1.65,-20),Vector3(0,0,500))
+	var radius: float = returned.node.collision_radius+hostile.node.collision_radius
+	var expected: float = (15.0-radius)/600.0
+	var actual: float = game._projectile_pair_time(returned,hostile,0.05)
+	var reverse: float = game._projectile_pair_time(hostile,returned,0.05)
+	expect(absf(actual-expected)<0.00001 and absf(reverse-expected)<0.00001,"relative sphere sweep finds the same analytic high-speed contact time in either argument order",{"expected_seconds":expected,"actual_seconds":actual,"reverse_seconds":reverse})
+	_reset()
+	returned = _chain_shot("bolt",Vector3(-2,1.65,-10),Vector3(40,0,0),true)
+	hostile = _chain_shot("missile",Vector3(0,1.65,-15),Vector3(0,0,40))
+	var missed: float = game._projectile_pair_time(returned,hostile,0.2)
+	var event: Dictionary = game._next_projectile_event(0.2)
+	game._update_projectiles(0.2)
+	expect(is_inf(missed) and event.is_empty() and game.projectiles.size()==2 and _chain_explosions().is_empty() and game.health==5,"crossing spatial paths at different times do not create a false interception")
+	for reflected in [false,true]:
+		_reset()
+		_chain_shot("bolt",Vector3(0,1.65,-12),Vector3.ZERO,reflected)
+		_chain_shot("missile",Vector3(0,1.65,-12),Vector3.ZERO,reflected)
+		event = game._next_projectile_event(0.05)
+		game._update_projectiles(0.05)
+		expect(event.is_empty() and game.projectiles.size()==2 and _chain_explosions().is_empty(),("returned-returned" if reflected else "hostile-hostile")+" overlapping ammunition never collides with its own side")
+	_reset()
+	var target = _profile_target("normal")
+	var before: PackedByteArray = _remaining_authored_cells(target)
+	_chain_shot("missile",Vector3(0,1.65,-1),Vector3(0,0,-100),true)
+	hostile = _chain_shot("bolt",Vector3(0,1.65,-20),Vector3.ZERO)
+	event = game._next_projectile_event(0.2)
+	var hit_first: bool = str(event.get("kind",""))=="enemy" and event.get("target")==target
+	expect(hit_first,"a nearer real enemy surface wins before a later returned-shot versus hostile contact")
+	if hit_first:
+		game._update_projectiles(0.2)
+		var material: Dictionary = _material_result(target,before,event.point,1.45)
+		expect(bool(material.matches_full_scan) and int(material.removed)>0 and game.projectiles.size()==1 and game.projectiles[0]==hostile and int(game.combat_stats.get("projectile_chain_detonations",0))==0,"the earlier body impact retains its exact original sphere deletion and leaves the distant hostile unignited",{"material":material})
+
+
+func _verify_interception_order_and_guard_reward() -> void:
+	var rows: Array = []
+	for reverse in [false,true]:
+		for earlier_hit in [false,true]:
+			_reset()
+			var specs: Array = [{"kind":"bolt","point":Vector3(0,1.65,-5),"velocity":Vector3(0,0,-100),"reflected":true},{"kind":"missile","point":Vector3(0,1.65,-20),"velocity":Vector3(0,0,500),"reflected":false}]
+			if earlier_hit: specs.append({"kind":"bolt","point":Vector3(6,1.65,-1.9),"velocity":Vector3(0,0,100),"reflected":false})
+			if reverse: specs.reverse()
+			for spec: Dictionary in specs: _chain_shot(str(spec.kind),spec.point,spec.velocity,bool(spec.reflected))
+			var first: Dictionary = game._next_projectile_event(0.05)
+			expect(str(first.get("kind",""))==("player" if earlier_hit else "intercept") and (not earlier_hit or absf(float(first.time)-0.01)<0.00001),"global event selection follows physical time before projectile array order",{"reverse_array":reverse,"earlier_independent_hit":earlier_hit,"first_kind":first.get("kind",""),"time":first.get("time",-1.0)})
+			game._update_projectiles(0.05)
+			var count: int = 3 if earlier_hit else 2
+			var children: int = 0
+			for explosion: Dictionary in _chain_explosions():
+				if bool(explosion.get("chain_reaction",false)) and int(explosion.get("chain_depth",0))==1 and not bool(explosion.get("was_reflected",true)): children += 1
+			var conserved: bool = game.projectiles.is_empty() and _chain_explosions().size()==count and int(game.combat_stats.get("projectile_explosions",0))==count and int(game.combat_stats.get("projectile_interceptions",0))==1 and int(game.combat_stats.get("projectile_chain_detonations",0))==1 and children==1
+			var no_reward: bool = int(game.combat_stats.get("parries",0))==0 and int(game.combat_stats.get("projectiles_reflected",0))==0 and int(game.combat_stats.get("projectiles_cut",0))==0 and game.score==0 and game.combo==0 and is_equal_approx(game.speed,30.0)
+			expect(conserved and no_reward and game.health==(4 if earlier_hit else 5),"high-speed interception removes both shots before the threatened crossing, preserves an earlier unrelated hit and awards no invented parry or cut",{"reverse_array":reverse,"earlier_independent_hit":earlier_hit,"health":game.health,"explosions":count,"children":children})
+			rows.append({"reverse_array":reverse,"earlier_independent_hit":earlier_hit,"health":game.health,"explosions":_chain_explosions().size()})
+	_reset()
+	game._begin_guard()
+	game.guard_age = 0.075
+	game._spawn_projectile(Vector3(-0.05,1.65,-1.0),"bolt")
+	game._spawn_projectile(Vector3(0.05,1.65,-1.0),"missile")
+	game._update_projectiles(0.05)
+	expect(game.projectiles.is_empty() and _chain_explosions().size()==2 and game.health==5 and game.guard_chain_hits==1 and int(game.combat_stats.get("parries",0))==1 and int(game.combat_stats.get("projectiles_reflected",0))==1 and int(game.combat_stats.get("projectile_interceptions",0))==1 and int(game.combat_stats.get("projectile_chain_detonations",0))==1 and int(game.combat_stats.get("projectiles_cut",0))==0 and is_equal_approx(game.speed,47.0) and game.combo==1 and game.score==200*game.gear_for_speed(47.0),"a tightly clustered volley is consumed by one real parry plus interception, with exactly one perfect speed/combo/score reward and one explosion per shot")
+	observations["interception_order"] = rows
+
+
+func _verify_chain_payloads_and_callbacks() -> void:
+	_reset()
+	var root_shot: Dictionary = _chain_shot("bolt",Vector3(0,1.65,-12),Vector3.ZERO,true)
+	_chain_shot("missile",Vector3(1.15,1.65,-12),Vector3.ZERO)
+	_chain_shot("bolt",Vector3(2.65,1.65,-12),Vector3.ZERO)
+	_chain_shot("shock",Vector3(3.8,1.65,-12),Vector3.ZERO)
+	var far: Dictionary = _chain_shot("bolt",Vector3(8,1.65,-12),Vector3.ZERO)
+	var other_return: Dictionary = _chain_shot("bolt",Vector3(0.3,1.65,-12),Vector3.ZERO,true)
+	game._detonate_projectile(0,root_shot.node.global_position)
+	var depths: Array = []
+	var radii: Array = []
+	var provenance: bool = true
+	for explosion: Dictionary in _chain_explosions():
+		depths.append(int(explosion.get("chain_depth",-1)))
+		radii.append(float(explosion.get("blast_radius",-1.0)))
+		provenance = provenance and bool(explosion.get("reflected",false)) and bool(explosion.get("was_reflected",false))==(int(explosion.get("chain_depth",-1))==0) and bool(explosion.get("chain_reaction",false))==(int(explosion.get("chain_depth",-1))>0)
+	expect(depths==[0,1,2,3] and radii==[0.90,1.45,0.90,1.15] and provenance,"multi-hop ignition uses each original payload radius plus the next physical shot radius, with truthful reflected/child provenance",{"depths":depths,"radii":radii})
+	var survivors: bool = game.projectiles.size()==2 and game.projectiles.has(far) and game.projectiles.has(other_return)
+	expect(survivors and _chain_explosions().size()==4 and int(game.combat_stats.get("projectile_chain_detonations",0))==3 and int(game.combat_stats.get("projectile_explosions",0))==4 and game.health==5 and game.score==0 and game.kills==0 and int(game.combat_stats.get("projectiles_cut",0))==0 and int(game.combat_stats.get("projectiles_reflected",0))==0,"multi-hop blasts consume each claimed hostile once while preserving a far hostile, another returned shot and every player resource")
+	_reset()
+	_chain_shot("bolt",Vector3(0,1.65,-12),Vector3.ZERO)
+	_chain_shot("missile",Vector3(1.15,1.65,-12),Vector3.ZERO)
+	_chain_shot("bolt",Vector3(2.65,1.65,-12),Vector3.ZERO)
+	game._cut_projectile(0)
+	expect(game.projectiles.size()==2 and _chain_explosions().size()==1 and int(game.combat_stats.get("projectile_chain_detonations",0))==0 and int(game.combat_stats.get("projectiles_cut",0))==1 and game.score==30*game.gear and game.health==5 and game.kills==0,"ordinary unreflected blade detonation cannot seed a chain and pays only its one existing cut reward")
+	_reset()
+	var target = _profile_target("normal")
+	var point: Vector3 = _posed_local(target,Vector3(0,1.86,0.30))
+	game.boss_enemy = target
+	game.boss_spawned = true
+	_chain_shot("missile",point,Vector3.ZERO,true)
+	_chain_shot("bolt",point+Vector3(1,0,0),Vector3.ZERO)
+	_chain_shot("bolt",Vector3(4,1.65,-30),Vector3.ZERO)
+	game._detonate_projectile(0,point)
+	var kills: int = game.kills
+	var score: int = game.score
+	game._update_projectiles(0.2)
+	game._update_projectiles(0.2)
+	expect(target.dead and game.victory_timer>=0.0 and game.projectiles.is_empty() and _chain_explosions().size()==2 and int(game.combat_stats.get("projectile_chain_detonations",0))==1 and int(game.combat_stats.get("projectile_explosions",0))==2 and game.kills==1 and game.kills==kills and game.score==score and game.health==5,"the full chain is claimed before a real Boss-owner sever clears the live array, preserving the queued child exactly once and preventing duplicate score")
+	observations["chain_payloads"] = {"depths":depths,"radii":radii,"boss_callback_explosions":_chain_explosions().size()}
+
+
+func _verify_chain_freeze_and_capacity() -> void:
+	_reset()
+	_chain_shot("bolt",Vector3(0,1.65,-20),Vector3.ZERO,true)
+	for index in range(39): _chain_shot("bolt",Vector3(float(index+1)*0.01,1.65,-20),Vector3.ZERO)
+	var count: int = game.projectiles.size()
+	var snapshots: Array = []
+	for shot: Dictionary in game.projectiles: snapshots.append({"point":shot.node.global_position,"age":shot.age})
+	game._update_projectiles(0.0)
+	game.hit_stop = 1.0
+	game._process(0.016)
+	game._pause_game()
+	game._process(0.02)
+	var frozen: bool = game.projectiles.size()==count and _chain_explosions().is_empty()
+	for index in range(game.projectiles.size()): frozen = frozen and game.projectiles[index].node.global_position==snapshots[index].point and game.projectiles[index].age==snapshots[index].age
+	expect(count==24 and frozen,"a full touching mixed-ownership pool respects the24-shot cap and cannot ignite while world time, hitstop or pause is frozen")
+	game._resume_game()
+	game.hit_stop = 0.0
+	game._update_projectiles(0.01)
+	expect(game.projectiles.is_empty() and _chain_explosions().size()==count and int(game.combat_stats.get("projectile_chain_detonations",0))==count-1 and int(game.combat_stats.get("projectile_explosions",0))==count and int(game.combat_stats.get("projectile_interceptions",0))==1 and game.blasts.size()<=12 and game.health==5 and game.score==0 and int(game.combat_stats.get("parries",0))==0 and int(game.combat_stats.get("projectiles_cut",0))==0,"resuming a full contact chain consumes exactly the bounded pool once, keeps the12-blast budget and cannot farm parry or cut rewards")
+	game._update_projectiles(1.0)
+	expect(_chain_explosions().size()==count and game.projectiles.is_empty() and game.health==5,"an already consumed chain cannot detonate or damage again on a later update")
+
+
 func _verify_chain_and_crossing() -> void:
 	_reset()
 	game._begin_guard()
 	game.guard_age = 0.075
-	game._spawn_projectile(Vector3(-0.05, 1.65, -1.0), "bolt")
-	game._spawn_projectile(Vector3(0.05, 1.65, -1.0), "missile")
-	game._update_projectiles(0.05)
+	# Keep this a same-window multi-guard contract. The original0.1m cluster
+	# is now covered separately by returned-shot interception and chain blast.
+	game._spawn_projectile(Vector3(-1.2, 1.65, -4.9), "bolt")
+	game.projectiles.back().velocity = Vector3(0,0,32)
+	game._spawn_projectile(Vector3(1.2, 1.65, -4.9), "missile")
+	game.projectiles.back().velocity = Vector3(0,0,32)
+	var simultaneous_dt: float = (-0.9-float(game.projectiles[0].node.global_position.z))/32.0
+	var boundary: Dictionary = game._next_projectile_event(simultaneous_dt)
+	expect(str(boundary.get("kind",""))=="player" and float(boundary.get("time",-1.0))==simultaneous_dt,"the two separated guard contacts lie exactly on the requested frame-end TOI")
+	game._update_projectiles(simultaneous_dt)
 	var reflected := 0
 	for projectile in game.projectiles:
 		if bool(projectile.get("reflected", false)): reflected += 1
-	expect(reflected == 2 and int(game.combat_stats.get("parries", 0)) == 1 and game.guard_chain_hits == 2, "one parry window reflects both simultaneous shots but pays one speed reward")
+	expect(reflected == 2 and int(game.combat_stats.get("parries", 0)) == 1 and game.guard_chain_hits == 2 and is_equal_approx(game.speed,47.0) and game.combo==1 and game.score==200*game.gear_for_speed(47.0), "one parry window resolves both separated frame-end contacts and pays exactly one perfect speed/combo/score reward")
 	_reset()
 	var shot: Node3D = game._spawn_projectile(Vector3(0.0, 1.65, -20.0), "missile")
 	game.projectiles[0].velocity = Vector3(0, 0, 120)
@@ -901,6 +1057,10 @@ func _run() -> void:
 		_cut_shot(kind)
 		_reflect_shot(kind)
 	_verify_chain_and_crossing()
+	_verify_relative_interception()
+	_verify_interception_order_and_guard_reward()
+	_verify_chain_payloads_and_callbacks()
+	_verify_chain_freeze_and_capacity()
 	_verify_freeze_and_limits()
 	_verify_obstacles()
 	_verify_new_voxels()

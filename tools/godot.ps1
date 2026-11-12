@@ -59,7 +59,7 @@ switch ($Task) {
         Write-Host 'Project import and startup checks passed.'
     }
     'ExportWindows' {
-        New-Item -ItemType Directory -Path (Join-Path $projectRoot 'builds/windows-v0910') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $projectRoot 'builds/windows-v0117') -Force | Out-Null
         Invoke-GodotChecked -EngineArguments @('--headless', '--path', $projectRoot, '--export-release', 'Windows Desktop')
     }
     'Verify' {

@@ -38,6 +38,11 @@ var _origin := Vector3.ZERO
 var _material: Material
 var _visual: MeshInstance3D
 var _bounds := AABB()
+var _bulk_vertices := PackedVector3Array()
+var _bulk_normals := PackedVector3Array()
+var _bulk_colors := PackedColorArray()
+var _face_normals: Array[PackedVector3Array] = []
+var _face_colors: Array = []
 
 
 func configure_voxels(source_cells: Dictionary, size: float, colors: Array[Color], material: Material, origin: Vector3, source_mesh: ArrayMesh = null, mesh_translation: Vector3 = Vector3.ZERO) -> void:
@@ -111,33 +116,35 @@ func _cut_shape(camera: Camera3D, points: PackedVector2Array, power: float, blad
 	if segments.is_empty() and regions.is_empty():
 		return {"removed": 0, "killed": false}
 	var removed: Array[Vector3i] = []
+	var particle_sources := PackedVector3Array()
+	var world := global_transform
+	var band_squared := band * band
 	for coordinate: Vector3i in cells:
-		var world_point := to_global(_cell_point(coordinate))
+		var world_point := world * _cell_point(coordinate)
 		if camera.is_position_behind(world_point):
 			continue
 		var projected := camera.unproject_position(world_point)
-		var intersects: bool = not regions.is_empty() and point_in_sweep(projected, regions, band * band)
+		var intersects: bool = not regions.is_empty() and point_in_sweep(projected, regions, band_squared)
 		for segment in segments:
-			if Geometry2D.get_closest_point_to_segment(projected, points[segment], points[segment + 1]).distance_squared_to(projected) <= band * band:
+			if Geometry2D.get_closest_point_to_segment(projected, points[segment], points[segment + 1]).distance_squared_to(projected) <= band_squared:
 				intersects = true
 				break
 		if intersects:
 			removed.append(coordinate)
+			particle_sources.append(world_point)
 	if removed.is_empty():
 		return {"removed": 0, "killed": false}
-	var particle_sources := PackedVector3Array()
-	for coordinate in removed:
-		particle_sources.append(to_global(_cell_point(coordinate)))
-	emit_cut_particles(get_parent(), camera, particle_sources, _longest_stroke(points), cell_size, "debris")
+	var stroke := _longest_stroke(points)
+	var stroke_direction := stroke.normalized()
+	emit_cut_particles(get_parent(), camera, particle_sources, stroke, cell_size, "debris")
 	for coordinate in removed:
 		cells.erase(coordinate)
-	var stroke := _longest_stroke(points)
 	if bool(get_parent().get_meta("flythrough_enabled", false)):
-		velocity += Vector3(stroke.normalized().x * 2.8, -stroke.normalized().y * 1.5 + 0.6, 2.5)
-		spin += Vector3(0.8, 0.35, -stroke.normalized().x * 1.6)
+		velocity += Vector3(stroke_direction.x * 2.8, -stroke_direction.y * 1.5 + 0.6, 2.5)
+		spin += Vector3(0.8, 0.35, -stroke_direction.x * 1.6)
 	else:
-		velocity += Vector3(stroke.normalized().x * 0.9, 0.25, 0.15)
-		spin += Vector3(0.3, 0.1, -stroke.normalized().x * 0.5)
+		velocity += Vector3(stroke_direction.x * 0.9, 0.25, 0.15)
+		spin += Vector3(0.3, 0.1, -stroke_direction.x * 0.5)
 	elapsed = minf(elapsed, lifetime - 1.3)
 	if cells.is_empty():
 		visible = false
@@ -294,11 +301,13 @@ class CutVoxelBurst extends Node3D:
 		if points.is_empty():
 			return
 		_refresh_draw_projection()
+		var camera_basis := camera.global_basis
+		var world_inverse := _draw_world.affine_inverse()
 		last_source_kind = kind
-		last_cut_tangent = (camera.global_basis * Vector3(stroke.x, -stroke.y, 0.0)).normalized()
+		last_cut_tangent = (camera_basis * Vector3(stroke.x, -stroke.y, 0.0)).normalized()
 		if last_cut_tangent.length_squared() < 0.001:
-			last_cut_tangent = camera.global_basis.x
-		last_cut_normal = last_cut_tangent.cross(camera.global_basis.z).normalized()
+			last_cut_tangent = camera_basis.x
+		last_cut_normal = last_cut_tangent.cross(camera_basis.z).normalized()
 		var flythrough := bool(source_owner.get_meta("flythrough_enabled", false))
 		var sever := kind == "sever"
 		var material_span := sqrt(float(points.size()))
@@ -322,11 +331,13 @@ class CutVoxelBurst extends Node3D:
 		# Sampling every depth layer made the first hot frame disappear inside
 		# the upper/lower fragments, especially while hit-stop froze motion.
 		var front_cells: Dictionary = {}
+		var front_depths: Dictionary = {}
 		for point in points:
-			var view_point := camera.to_local(point)
+			var view_point := _draw_camera_inverse * point
 			var column := Vector2i(roundi(view_point.x / source_cell), roundi(view_point.y / source_cell))
-			if not front_cells.has(column) or view_point.z > camera.to_local(front_cells[column]).z:
+			if not front_cells.has(column) or view_point.z > float(front_depths[column]):
 				front_cells[column] = point
+				front_depths[column] = view_point.z
 		var surface_points: Array = front_cells.values()
 		last_origins.clear()
 		last_sources.clear()
@@ -385,7 +396,7 @@ class CutVoxelBurst extends Node3D:
 			# Start at the sampled cell's camera-facing surface with only a 2%
 			# cell separation. The real removed cell remains the recorded source;
 			# neither x-ray rendering nor an unrelated screen-space flash is used.
-			var spawn := source + camera.global_basis.z * source_cell * 0.52 + last_cut_normal * rng.randf_range(-0.05, 0.05) * source_cell
+			var spawn := source + camera_basis.z * source_cell * 0.52 + last_cut_normal * rng.randf_range(-0.05, 0.05) * source_cell
 			# Two opposing fans carry the cut, with a smaller wild scatter. The
 			# result is a broken spray rather than a uniform circular firework.
 			var side := -1.0 if number % 2 == 0 else 1.0
@@ -399,7 +410,7 @@ class CutVoxelBurst extends Node3D:
 			var depth_impulse := rng.randf_range(0.32, 0.82)
 			if number % 5 == 0:
 				depth_impulse = rng.randf_range(-0.20, 0.55)
-			heading += camera.global_basis.z * depth_impulse
+			heading += camera_basis.z * depth_impulse
 			# Keep the established impulse tiers, but make their main geometry
 			# compact solid cubes/cuboids. None is a velocity-aligned laser strip.
 			var tier := "pin"
@@ -492,7 +503,7 @@ class CutVoxelBurst extends Node3D:
 				dimensions = proportions*size
 				block_length = maxf(dimensions.x,maxf(dimensions.y,dimensions.z))
 				tail_phase = fposmod(tail_phase,0.018)
-			slots[index] = {"position": to_local(spawn), "velocity": velocity, "age": 0.0, "life": lifetime, "size": size, "length": block_length, "shutter": 0.0, "head_pixels": head_pixels, "tail_pixels": head_pixels * 0.45, "long_ray": false, "tier": tier, "drag": drag, "dimensions": dimensions, "orientation": orientation, "angular_velocity": angular_velocity, "cuboid": cuboid, "source_cell": source_cell, "tail_point": tail_point, "tail_phase": tail_phase, "held_cut":held_cut,"layer":layer,"heat_gain":heat_gain}
+			slots[index] = {"position": world_inverse * spawn, "velocity": velocity, "age": 0.0, "life": lifetime, "size": size, "length": block_length, "shutter": 0.0, "head_pixels": head_pixels, "tail_pixels": head_pixels * 0.45, "long_ray": false, "tier": tier, "drag": drag, "dimensions": dimensions, "orientation": orientation, "angular_velocity": angular_velocity, "cuboid": cuboid, "source_cell": source_cell, "tail_point": tail_point, "tail_phase": tail_phase, "held_cut":held_cut,"layer":layer,"heat_gain":heat_gain}
 			last_sources.append(source)
 			last_origins.append(spawn)
 			last_velocities.append(velocity)
@@ -529,7 +540,7 @@ class CutVoxelBurst extends Node3D:
 			return
 		_refresh_draw_projection()
 		var flow := Vector3.ZERO
-		if bool(source_owner.get_meta("flythrough_enabled", false)):
+		if bool(source_owner.get_meta("flythrough_enabled", false)) and not bool(source_owner.get_meta("boss_death_stationary",false)):
 			flow.z = maxf(48.0, float(source_owner.get_meta("runner_speed", 0.0)) * 1.35)
 		for index in range(slots.size()):
 			var slot: Dictionary = slots[index]
@@ -665,18 +676,22 @@ class CutVoxelBurst extends Node3D:
 
 func _process(delta: float) -> void:
 	var owner_node: Node3D = get_parent()
+	if bool(owner_node.get_meta("boss_death_hold",false)):
+		return
 	var simulation_scale: float = float(owner_node.get_meta("simulation_scale", 1.0))
 	var step: float = delta * simulation_scale
 	elapsed += step
 	velocity.y -= 12.0 * step
 	position += velocity * step
-	if bool(owner_node.get_meta("flythrough_enabled", false)):
+	if bool(owner_node.get_meta("flythrough_enabled", false)) and not bool(owner_node.get_meta("boss_death_stationary",false)):
 		# Parent motion is already applied by the runner. Replace it, rather than
 		# adding another full running speed to fragments attached to a live enemy.
 		var parent_motion: Vector3 = owner_node.get_meta("root_motion_velocity", Vector3(0, 0, float(owner_node.get_meta("root_forward_speed", 0.0))))
 		var runner_speed: float = maxf(0.0, float(owner_node.get_meta("runner_speed", 0.0)))
 		position += (Vector3(0, 0, maxf(48.0, runner_speed * 1.35)) - parent_motion) * step
 	rotation += spin * step
+	if has_meta("world_floor_height"):
+		floor_height = float(get_meta("world_floor_height"))-owner_node.global_position.y
 	if position.y < floor_height:
 		position.y = floor_height
 		velocity.y = absf(velocity.y) * 0.20
@@ -693,14 +708,19 @@ func _process(delta: float) -> void:
 
 
 func _split_disconnected(stroke: Vector2) -> void:
-	var groups: Array = _connected_groups()
-	if groups.size() <= 1:
-		return
-	groups.sort_custom(func(a: Array, b: Array) -> bool: return a.size() > b.size())
 	var piece_count := 0
 	for sibling in get_parent().get_children():
 		if sibling.get_meta("voxel_piece", false) and not sibling.is_queued_for_deletion():
 			piece_count += 1
+	# The full pool retains every extra island in this same sliceable chunk.
+	# No connectivity result is consumed in that branch, so skip its scan.
+	if piece_count >= MAX_VOXEL_PIECES:
+		return
+	var groups: Array = _connected_groups()
+	if groups.size() <= 1:
+		return
+	groups.sort_custom(func(a: Array, b: Array) -> bool: return a.size() > b.size())
+	var stroke_direction := stroke.normalized()
 	for group_index in range(1, groups.size()):
 		if piece_count >= MAX_VOXEL_PIECES:
 			# Keep additional islands visible and sliceable in this chunk instead of deleting material.
@@ -716,13 +736,18 @@ func _split_disconnected(stroke: Vector2) -> void:
 		get_parent().add_child(fragment)
 		fragment.transform = transform * Transform3D(Basis.IDENTITY, center)
 		if bool(get_parent().get_meta("flythrough_enabled", false)):
-			fragment.velocity = velocity + Vector3(signf(center.x) * 1.8 + stroke.normalized().x * 1.6, 0.8 - stroke.normalized().y, 1.2)
+			fragment.velocity = velocity + Vector3(signf(center.x) * 1.8 + stroke_direction.x * 1.6, 0.8 - stroke_direction.y, 1.2)
 			fragment.spin = spin + Vector3(0.8, -0.5, 1.1)
 		else:
-			fragment.velocity = velocity + Vector3(signf(center.x) * 0.7 + stroke.normalized().x * 0.6, 0.6, 0.3)
+			fragment.velocity = velocity + Vector3(signf(center.x) * 0.7 + stroke_direction.x * 0.6, 0.6, 0.3)
 			fragment.spin = spin + Vector3(0.3, -0.2, 0.4)
 		fragment.lifetime = maxf(1.8, lifetime - elapsed)
 		fragment.floor_height = maxf(0.04, floor_height + center.y)
+		if has_meta("world_floor_height"):
+			fragment.set_meta("world_floor_height",float(get_meta("world_floor_height"))+fragment.position.y-position.y)
+			fragment.floor_height = float(fragment.get_meta("world_floor_height"))-get_parent().global_position.y
+		if get_parent().has_meta("sky_lane"):
+			fragment.floor_height = floor_height + center.y
 		fragment.configure_voxels(group_cells, cell_size, palette, _material, _origin - center)
 		for coordinate: Vector3i in group:
 			cells.erase(coordinate)
@@ -730,12 +755,13 @@ func _split_disconnected(stroke: Vector2) -> void:
 
 
 func _connected_groups() -> Array:
-	var unvisited: Dictionary = {}
-	for coordinate in cells:
-		unvisited[coordinate] = true
+	var unvisited: Dictionary = cells.duplicate()
 	var groups: Array = []
-	while not unvisited.is_empty():
-		var first: Vector3i = unvisited.keys()[0]
+	# Dictionary iteration preserves the same first-remaining seed order, but
+	# does not allocate all remaining keys again for every disconnected island.
+	for first: Vector3i in cells:
+		if not unvisited.has(first):
+			continue
 		var queue: Array[Vector3i] = [first]
 		var head := 0
 		unvisited.erase(first)
@@ -768,18 +794,50 @@ func _rebuild() -> void:
 	if cells.is_empty():
 		_visual.visible = false
 		return
-	var surface := SurfaceTool.new()
-	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var low := Vector3(INF, INF, INF)
-	var high := Vector3(-INF, -INF, -INF)
-	var grid_low: Vector3i = cells.keys()[0]
+	_bulk_vertices = PackedVector3Array()
+	_bulk_normals = PackedVector3Array()
+	_bulk_colors = PackedColorArray()
+	_face_normals = []
+	_face_colors = []
+	var bulk := cells.size() >= 128
+	var surface: SurfaceTool
+	if bulk:
+		for side in range(6):
+			var normal := Vector3(DIRECTIONS[side])
+			_face_normals.append(PackedVector3Array([normal,normal,normal,normal,normal,normal]))
+			var shades: Array[PackedColorArray] = []
+			for color: Color in palette:
+				var shade := 0.84+maxf(normal.y,0.0)*0.16
+				var tint := Color(color.r*shade,color.g*shade,color.b*shade,1.0)
+				shades.append(PackedColorArray([tint,tint,tint,tint,tint,tint]))
+			_face_colors.append(shades)
+	else:
+		surface = SurfaceTool.new()
+		surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var coordinates := cells.keys()
+	var materials := cells.values()
+	var grid_low: Vector3i = coordinates[0]
 	var grid_high := grid_low
-	for coordinate: Vector3i in cells:
-		var point := _cell_point(coordinate)
-		low = low.min(point - Vector3.ONE * cell_size * 0.5)
-		high = high.max(point + Vector3.ONE * cell_size * 0.5)
+	for coordinate: Vector3i in coordinates:
 		grid_low = grid_low.min(coordinate)
 		grid_high = grid_high.max(coordinate)
+	var span := grid_high-grid_low+Vector3i(3,3,3)
+	var plane := span.x*span.y
+	# Disconnected/sparse recut islands may span a huge integer box. Keep
+	# those on the original dictionary lookup path instead of allocating it.
+	var dense := span.x>0 and span.y>0 and span.z>0 and span.x<=2000000 and span.y<=2000000 and span.z<=2000000 and plane*span.z<=2000000
+	var occupied := PackedByteArray()
+	var indices := PackedInt32Array()
+	if dense:
+		occupied.resize(plane*span.z)
+		for coordinate: Vector3i in coordinates:
+			var p := coordinate-grid_low+Vector3i.ONE
+			var index := p.x+p.y*span.x+p.z*plane
+			occupied[index] = 1
+			indices.append(index)
+	var strides := [1,-1,span.x,-span.x,plane,-plane]
+	var low := _cell_point(grid_low) - Vector3.ONE * cell_size * 0.5
+	var high := _cell_point(grid_high) + Vector3.ONE * cell_size * 0.5
 	# Keep every real cell for cuts and connectivity. Only coplanar exposed
 	# faces of the same palette entry share a rectangle in the visual mesh.
 	for side in range(6):
@@ -789,10 +847,11 @@ func _rebuild() -> void:
 		var row := grid_high[u] - grid_low[u] + 1
 		var rows := grid_high[v] - grid_low[v] + 1
 		var layers: Dictionary = {}
-		for coordinate: Vector3i in cells:
-			if cells.has(coordinate + DIRECTIONS[side]):
+		for item in range(coordinates.size()):
+			var coordinate: Vector3i = coordinates[item]
+			if (occupied[indices[item]+int(strides[side])] != 0 if dense else cells.has(coordinate+DIRECTIONS[side])):
 				continue
-			var layer := Vector2i(coordinate[axis], int(cells[coordinate]))
+			var layer := Vector2i(coordinate[axis], int(materials[item]))
 			if not layers.has(layer):
 				layers[layer] = {}
 			layers[layer][coordinate[u] - grid_low[u] + (coordinate[v] - grid_low[v]) * row] = true
@@ -826,10 +885,43 @@ func _rebuild() -> void:
 				var center := _cell_point(coordinate)
 				center[u] += float(width - 1) * cell_size * 0.5
 				center[v] += float(height - 1) * cell_size * 0.5
-				_add_face(surface, center, side, palette[layer.y], width, height)
+				if bulk: _append_bulk_face(center, side, layer.y, width, height)
+				else: _add_face(surface,center,side,palette[layer.y],width,height)
 	_bounds = AABB(low, high - low)
-	_visual.mesh = surface.commit()
+	if bulk:
+		var arrays: Array = []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = _bulk_vertices
+		arrays[Mesh.ARRAY_NORMAL] = _bulk_normals
+		arrays[Mesh.ARRAY_COLOR] = _bulk_colors
+		var mesh := ArrayMesh.new()
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,arrays)
+		_visual.mesh = mesh
+	else: _visual.mesh = surface.commit()
+	_bulk_vertices = PackedVector3Array()
+	_bulk_normals = PackedVector3Array()
+	_bulk_colors = PackedColorArray()
+	_face_normals.clear()
+	_face_colors.clear()
 	_visual.visible = true
+
+
+
+func _append_bulk_face(center: Vector3, side: int, material: int, width: int = 1, height: int = 1) -> void:
+	var normal := Vector3(DIRECTIONS[side])
+	var tangent: Vector3 = Vector3.UP if side < 2 else Vector3.RIGHT
+	var bitangent: Vector3 = normal.cross(tangent)
+	var half := cell_size * 0.5
+	var face_center := center + normal * half
+	var along := tangent * half * width
+	var across := bitangent * half * height
+	var a := face_center + along + across
+	var b := face_center + along - across
+	var c := face_center - along - across
+	var d := face_center - along + across
+	_bulk_vertices.append_array(PackedVector3Array([a,b,c,a,c,d]))
+	_bulk_normals.append_array(_face_normals[side])
+	_bulk_colors.append_array(_face_colors[side][material])
 
 
 func _add_face(surface: SurfaceTool, center: Vector3, side: int, color: Color, width: int = 1, height: int = 1) -> void:
@@ -845,9 +937,9 @@ func _add_face(surface: SurfaceTool, center: Vector3, side: int, color: Color, w
 	var c := face_center - along - across
 	var d := face_center - along + across
 	var shade := 0.84 + maxf(normal.y, 0.0) * 0.16
+	surface.set_normal(normal)
+	surface.set_color(Color(color.r * shade, color.g * shade, color.b * shade, 1.0))
 	for vertex in [a, b, c, a, c, d]:
-		surface.set_normal(normal)
-		surface.set_color(Color(color.r * shade, color.g * shade, color.b * shade, 1.0))
 		surface.add_vertex(vertex)
 
 
