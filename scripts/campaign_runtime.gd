@@ -3,6 +3,7 @@ extends RefCounted
 ## Main-scene adapter for immutable plans. Geometry is warmed before the run;
 ## only one actor is activated per frame and blocked slots never catch up.
 
+const Locale = preload("res://scripts/game_locale.gd")
 const Director = preload("res://scripts/campaign_director.gd")
 const Encounters = preload("res://scripts/encounter_director.gd")
 const EntryMotion = preload("res://scripts/series_entry_motion.gd")
@@ -210,7 +211,7 @@ func _begin_level() -> void:
 	_clearance_quiet = 0.0
 	_breather_started = false
 	phase = "combat"
-	game._notice("第%d关 / 4 · %s" % [current_level_index+1,series_label()],2.8)
+	game._notice(Locale.text("第%d关 / 4 · %s") % [current_level_index+1,Locale.text(series_label())],2.8)
 	game._record_combat("campaign_level",null,{"level":current_level_index,"series":current_series_id,"tier":difficulty_tier()})
 
 
@@ -502,9 +503,9 @@ func _begin_boss_stage() -> void:
 	game._record_combat("campaign_boss_stage",null,{"series":current_series_id,"stage":_boss_stage,"members":members.duplicate()})
 	var title: String = "四人战术小队" if members.size() == 4 else str(game.series_kind_info(str(members[0])).get("label","守关者"))
 	var tip: String = {"ink_master":"斩双腕剑匣连接，掀开护胸","cyber_captain":"先断队长中继架，打乱全队轮攻","cyber_helicopter":"尾旋翼支架失连，会打开机腹装甲","cyber_tank":"切断左右悬挂，让核心护甲错位","cyber_gunship":"斩双升力舱承力颈，暴露内部核心","sea_leviathan":"逐一斩断四足，让巨兽倾倒露腹","empire_dreadnought":"斩外露电容支架，掀开舰艏装甲"}.get(str(members[0]),"")
-	var objective := "切断两组机组"
-	if not tip.is_empty(): objective += " · "+tip
-	game._notice(title+" · "+objective,5.0)
+	var objective := Locale.text("切断两组机组")
+	if not tip.is_empty(): objective += " · "+Locale.text(tip)
+	game._notice(Locale.text(title)+" · "+objective,5.0)
 
 
 func _start_cyber_deployment() -> void:
@@ -711,7 +712,7 @@ func complete_level() -> void:
 	game.health = mini(5,int(game.health)+1)
 	var next_series: int = run.route[current_level_index+1]
 	game.series_scenery.begin_transition(next_series)
-	game._notice("区域突破 · 前往%s" % str(Director.get_series_definition(next_series).label),3.0)
+	game._notice(Locale.text("区域突破 · 前往%s") % Locale.text(Director.get_series_definition(next_series).label),3.0)
 
 
 func get_debug_state() -> Dictionary:

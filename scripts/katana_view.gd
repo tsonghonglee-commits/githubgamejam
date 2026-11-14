@@ -11,10 +11,14 @@ const HELD_DEPTH := 1.22
 const DEFAULT_BLADE_AXIS := Vector2(0.38, -0.925)
 const AXIS_RESPONSE_DISTANCE := 52.0
 const SLASH_RECOVERY_TIME := 0.23
+const HEAVY_CONTACT_MIN := 0.055
+const HEAVY_CONTACT_MAX := 0.095
 const SHEATHE_TIME := 0.44
 const SHEATHE_INSERT_TIME := 0.27
 const FOREARM := Vector3(0.025, 0.105, -0.285)
 const VIEWMODEL_Z_CLIP_SCALE := 0.9
+const LONG_EDGE_TIP := Vector3(0.0, 1.53, 0.0)
+const LONG_CUT_POINT := Vector3(0.0, 0.78, 0.0)
 const HELD_VOXEL_CAPACITY := 96
 const HELD_VOXEL_EDGE_STATIONS: Array[Vector2] = [Vector2(0.025,-0.019),Vector2(0.20,-0.018),Vector2(0.47,-0.014),Vector2(0.65,-0.012),Vector2(0.76,-0.006),Vector2(0.86,0.0)]
 const LIGHT_SLASHES: Array[Dictionary] = [
@@ -143,6 +147,49 @@ var _energy_arc: MeshInstance3D
 var _energy_material: StandardMaterial3D
 var _edge_material: StandardMaterial3D
 var _blade_face_material: StandardMaterial3D
+var _blade_bevel_material: StandardMaterial3D
+var _blade_spine_material: StandardMaterial3D
+var _finish_sheath: StandardMaterial3D
+var _finish_wrap: StandardMaterial3D
+var _finish_fittings: StandardMaterial3D
+var _weapon_family := "factory"
+var _weapon_skin := "factory"
+var _weapon_hand := 1
+var _katana_meshes: Array[Node3D] = []
+var _dual_left: Node3D
+var _dual_right: Node3D
+var _dual_metal: Array[Node3D] = []
+var _dual_plasma: Array[Node3D] = []
+var _plasma_ignition := 1.0
+var _plasma_visible := false
+var _heavy_shape: Node3D
+var _heavy_finish: StandardMaterial3D
+var _heavy_bridge: Node3D
+var _heavy_dampers: Array[Node3D] = []
+var _heavy_coil: StandardMaterial3D
+var _weapon_charge := 0.0
+var _heavy_contact_time := 0.0
+var _heavy_contact_pending := false
+var _heavy_contact_frame := false
+var _weapon_aim := Vector2(0.6, 0.8)
+var _red_scabbard: Node3D
+var _red_lock: Node3D
+var _factory_sheath_meshes: Array[Node3D] = []
+var _vermilion_blade: Node3D
+var _vermilion_sheath: Node3D
+var _frost_blade: Node3D
+var _frost_sheath: Node3D
+var _long_blade: Node3D
+var _long_sheath: Node3D
+var _yamato_blade: Node3D
+var _yamato_sheath: Node3D
+var _maul_grip: Node3D
+var _maul_emitters: Array[Node3D] = []
+var _maul_visible := false
+var _maul_ignition := 0.0
+var _alternate_alert_bands: Array[MeshInstance3D] = []
+var _alternate_alert_halos: Array[MeshInstance3D] = []
+var _alternate_outer_halos: Array[MeshInstance3D] = []
 var _action_from := Transform3D.IDENTITY
 var _slash_keys: Array[Dictionary] = []
 var _guard_keys: Array[Dictionary] = []
@@ -186,6 +233,9 @@ var _held_voxel_bounds := AABB()
 var _held_voxel_seeds := PackedVector3Array()
 var _held_voxel_cpu_poses: Array[Transform3D] = []
 var _held_voxel_cpu_colours := PackedColorArray()
+var _blade_fx_primary := Color("a8f5ff")
+var _blade_fx_secondary := Color("a8f5ff")
+var _blade_cut_markers: Array[MeshInstance3D] = []
 
 
 func _ready() -> void:
@@ -196,6 +246,9 @@ func _ready() -> void:
 	var ivory := _material(Color(0.63, 0.62, 0.54), 0.18, 0.56)
 	var copper := _material(Color(0.48, 0.25, 0.105), 0.78, 0.31)
 	var sheath_material := _material(Color(0.13, 0.024, 0.020), 0.30, 0.41)
+	_finish_sheath = sheath_material
+	_finish_wrap = wrap
+	_finish_fittings = copper
 	var glow := _material(Color(0.44, 0.83, 0.87), 0.35, 0.22, true)
 	_edge_material = glow
 	_scabbard = Node3D.new()
@@ -215,6 +268,9 @@ func _ready() -> void:
 	_build_sheath_alert(ivory)
 	for at in [Vector3(-0.026, -0.025, 0.025), Vector3(0.026, -0.025, 0.025), Vector3(0.022, -0.884, 0.024)]:
 		_box(_scabbard, Vector3(0.004, 0.006, 0.002), at, dark)
+	for child in _scabbard.get_children():
+		if child not in _sheath_alert_bands and child not in [_sheath_alert_halo,_sheath_outer_halo]:
+			_factory_sheath_meshes.append(child as Node3D)
 	_handle = Node3D.new()
 	_scabbard.add_child(_handle)
 	# One physical katana stays visible throughout drawing and sheathing. The
@@ -228,16 +284,18 @@ func _ready() -> void:
 	_blade_face_material = _material(Color(0.62, 0.67, 0.70), 0.78, 0.29)
 	_add_brushed_finish(_blade_face_material)
 	blade.set_surface_override_material(0, _blade_face_material)
-	blade.set_surface_override_material(1, _material(Color(0.84, 0.90, 0.93), 0.86, 0.17))
-	blade.set_surface_override_material(2, _material(Color(0.12, 0.15, 0.17), 0.84, 0.36))
+	_blade_bevel_material = _material(Color(0.84, 0.90, 0.93), 0.86, 0.17)
+	_blade_spine_material = _material(Color(0.12, 0.15, 0.17), 0.84, 0.36)
+	blade.set_surface_override_material(1, _blade_bevel_material)
+	blade.set_surface_override_material(2, _blade_spine_material)
 	blade.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_drawn.add_child(blade)
 	_edge_material = _material(Color(0.35, 0.68, 0.75), 0.68, 0.23, true)
 	var edge := _box(_drawn, Vector3(0.0018, 0.72, 0.002), Vector3(-0.018, 0.36, 0), _edge_material)
 	edge.rotation.z = -0.018
-	# The short mark identifies the one contact point used by continuous cuts.
-	_box(_drawn, Vector3(0.043, 0.009, 0.015), ACTIVE_CUT_POINT, glow)
 	_box(_drawn, Vector3(0.012, 0.055, 0.019), Vector3(0, 0.048, 0), copper)
+	for child in _drawn.get_children():
+		_katana_meshes.append(child as Node3D)
 	_drawn.transform = _dock_transform()
 	_trail = MeshInstance3D.new()
 	_trail.name = "BladeAfterimage"
@@ -272,6 +330,621 @@ func _ready() -> void:
 	_energy_arc.visible = false
 	add_child(_energy_arc)
 	_build_held_voxels()
+	_build_alternate_weapons(steel, dark, ivory, copper)
+	_build_blade_cut_markers()
+
+
+func set_weapon_finish(weapon: Dictionary) -> void:
+	var family := str(weapon.get("family", "factory"))
+	var skin := str(weapon.get("skin_id", weapon.get("id", "factory")))
+	if family != _weapon_family or skin != _weapon_skin:
+		_weapon_family = family
+		_weapon_skin = skin
+		_weapon_charge = 0.0
+		_maul_ignition = 0.0
+		_maul_visible = false
+		_plasma_visible = false
+		_sync_weapon_models()
+		if _mode == "sheathed": _drawn.transform = _dock_transform()
+	_blade_fx_primary = weapon.get("edge",_blade_fx_primary)
+	_blade_fx_secondary = weapon.get("secondary",_blade_fx_primary)
+	_blade_face_material.albedo_color = weapon.face
+	_blade_bevel_material.albedo_color = weapon.bevel
+	_blade_spine_material.albedo_color = weapon.spine
+	_finish_sheath.albedo_color = weapon.sheath
+	_finish_wrap.albedo_color = weapon.wrap
+	_finish_fittings.albedo_color = weapon.fittings
+	_edge_material.albedo_color = weapon.edge
+	_edge_material.emission = weapon.edge
+	_update_blade_cut_marker()
+
+
+func select_weapon_hand(hand: int) -> void:
+	var next := -1 if hand < 0 else 1
+	if _weapon_family != "dual" or next == _weapon_hand:
+		return
+	_weapon_hand = next
+	_drawn.transform = (_dual_left if next < 0 else _dual_right).transform
+	_update_blade_cut_marker()
+
+
+func _build_blade_cut_markers() -> void:
+	var mesh := QuadMesh.new()
+	mesh.size = Vector2(2.0,2.0)
+	var shader := Shader.new()
+	shader.code = """shader_type spatial;
+render_mode unshaded, blend_add, depth_draw_never, depth_test_disabled, cull_disabled, fog_disabled;
+uniform vec4 blade_tint : source_color = vec4(0.46, 0.83, 1.0, 1.0);
+uniform float intensity = 1.0;
+
+void fragment() {
+	vec2 offset = UV * 2.0 - 1.0;
+	float distance_squared = dot(offset, offset);
+	float core = exp(-distance_squared * 215.0);
+	float near_halo = exp(-distance_squared * 28.0);
+	float far_halo = exp(-distance_squared * 7.2);
+	float falloff = 1.0 - smoothstep(0.72, 1.0, distance_squared);
+	vec3 hot_core = mix(blade_tint.rgb, vec3(1.0), 0.88);
+	ALBEDO = mix(blade_tint.rgb, hot_core, core);
+	ALPHA = clamp((core * 0.88 + near_halo * 0.57 + far_halo * 0.38) * intensity, 0.0, 1.0) * falloff;
+}
+"""
+	for blade in [_drawn,_dual_left,_dual_right]:
+		var marker := MeshInstance3D.new()
+		marker.name = "CutPointGlint"
+		marker.mesh = mesh
+		marker.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var material := ShaderMaterial.new()
+		material.shader = shader
+		material.render_priority = 4
+		marker.material_override = material
+		marker.hide()
+		blade.add_child(marker)
+		_blade_cut_markers.append(marker)
+
+
+func _update_blade_cut_marker() -> void:
+	if _blade_cut_markers.is_empty(): return
+	var cutting := _mode == "slash" or _mode == "held"
+	var paired := _weapon_family == "dual"
+	var index := (1 if _weapon_hand < 0 else 2) if paired else 0
+	var supported := _weapon_family in ["factory","dual","long"]
+	for slot in _blade_cut_markers.size():
+		_blade_cut_markers[slot].visible = supported and cutting and slot == index
+	if not supported or not cutting: return
+	var marker := _blade_cut_markers[index]
+	marker.position = _blade_contact()
+	var anchor := marker.global_position
+	var depth := maxf(0.35,-_camera.to_local(anchor).z)
+	var pixel_height := 2.0*depth*tan(deg_to_rad(_camera.fov*0.5))/720.0
+	var energetic := _weapon_skin in ["plasma","maul"]
+	var flare := maxf(clampf(_motion_energy,0.0,1.0)*0.10,clampf(_contact_energy,0.0,1.0)*0.21)
+	var radius := (58.0 if energetic else 48.0)*pixel_height*(1.0+flare)
+	marker.global_basis = _camera.global_basis.scaled_local(Vector3(radius,radius,1.0))
+	var material := marker.material_override as ShaderMaterial
+	material.set_shader_parameter("blade_tint",_active_blade_tint().lerp(Color.WHITE,0.24))
+	material.set_shader_parameter("intensity",(1.21 if energetic else 1.05)+flare*0.6)
+
+
+func set_weapon_charge(charge: float, aim: Vector2) -> void:
+	if _weapon_family != "heavy":
+		return
+	if _weapon_charge <= 0.0 and charge > 0.0:
+		animation_event.emit(&"heavy_charge", 0.78)
+	_weapon_charge = clampf(charge, 0.0, 1.0)
+	if aim.length_squared() > 0.001:
+		_weapon_aim = aim.normalized()
+
+
+func play_heavy_slash(aim: Vector2, charge: float) -> void:
+	if _weapon_family != "heavy":
+		return
+	var release_pose := _drawn.transform
+	var strength := clampf(charge,0.0,1.0)
+	_weapon_charge = 0.0
+	if aim.length_squared() > 0.001:
+		_weapon_aim = aim.normalized()
+	_mode = "slash"
+	_action_time = 0.0
+	_slash_contact_hold = 0.0
+	_slash_contact_drag_elapsed = 0.0
+	_sheathing = false
+	_parry_reacting = false
+	_motion_energy = 1.0
+	_swing_direction = _weapon_aim
+	_heavy_contact_time = lerpf(HEAVY_CONTACT_MIN,HEAVY_CONTACT_MAX,strength)
+	_heavy_contact_pending = true
+	_heavy_contact_frame = false
+	var end := lerpf(0.25,0.35,strength)
+	_light_slash_times = Vector3(_heavy_contact_time+0.035,_heavy_contact_time+0.13,end-0.05)
+	_light_slash_duration = end
+	_slash_keys = _heavy_slash_keys(release_pose,strength)
+	_animation_phase = "windup"
+	_draw_connection.clear()
+	_trail_samples.clear()
+	animation_event.emit(&"blade_whoosh",lerpf(0.70,1.05,strength))
+
+
+func snap_heavy_contact() -> void:
+	if _weapon_family != "heavy" or _mode != "slash" or not _heavy_contact_pending:
+		return
+	_heavy_contact_pending = false
+	_heavy_contact_frame = true
+	_action_time = _heavy_contact_time
+	_drawn.transform = _sample_arm_keys(_slash_keys,_action_time)
+	_heavy_shape.transform = _drawn.transform
+	_animation_phase = "draw_contact"
+	var charge := inverse_lerp(HEAVY_CONTACT_MIN,HEAVY_CONTACT_MAX,_heavy_contact_time)
+	animation_event.emit(&"heavy_release",lerpf(0.70,1.25,charge))
+
+
+func get_heavy_preview_path(direction: Vector2, viewport_size: Vector2) -> PackedVector2Array:
+	var aim := direction.normalized() if direction.length_squared() > 0.001 else _weapon_aim
+	return _project_edge_path(_heavy_contact_pose(aim),viewport_size)
+
+
+func _build_alternate_weapons(steel: StandardMaterial3D, dark: StandardMaterial3D, ivory: StandardMaterial3D, copper: StandardMaterial3D) -> void:
+	_build_red_scabbard(dark, steel)
+	_dual_left = Node3D.new()
+	_dual_left.name = "LeftSword"
+	_dual_right = Node3D.new()
+	_dual_right.name = "RightSword"
+	for hand in [-1, 1]:
+		var root := _dual_left if hand < 0 else _dual_right
+		add_child(root)
+		_build_dual_sword(root, hand, steel, dark, ivory, copper)
+		root.transform = _dual_rest(hand)
+	_build_heavy_sword(dark, steel)
+	_build_katana_variants()
+	_sync_weapon_models()
+
+
+func _build_red_scabbard(dark: StandardMaterial3D, steel: StandardMaterial3D) -> void:
+	_red_scabbard = Node3D.new()
+	_red_scabbard.name = "RedScabbardMechanism"
+	_scabbard.add_child(_red_scabbard)
+	var vermilion := _material(Color("932c28"), 0.48, 0.38)
+	var lacquer := _material(Color("5d181e"), 0.38, 0.42)
+	for side in [-1.0, 1.0]:
+		_box(_red_scabbard, Vector3(0.027, 0.69, 0.051), Vector3(side * 0.045, -0.452, -0.005), lacquer)
+		_box(_red_scabbard, Vector3(0.014, 0.62, 0.009), Vector3(side * 0.043, -0.45, 0.028), vermilion)
+		for row in range(3):
+			_box(_red_scabbard, Vector3(0.010, 0.027, 0.009), Vector3(side * 0.053, -0.24 - float(row) * 0.055, 0.028), dark)
+	_box(_red_scabbard, Vector3(0.124, 0.069, 0.050), Vector3(0.010, -0.04, -0.016), dark)
+	_box(_red_scabbard, Vector3(0.105, 0.024, 0.035), Vector3(0.010, -0.032, 0.014), steel)
+	var actuator := _material(Color("b3a8a2"), 0.33, 0.33)
+	_box(_red_scabbard, Vector3(0.092, 0.009, 0.004), Vector3(0.010, -0.043, 0.032), actuator)
+	_box(_red_scabbard, Vector3(0.108, 0.042, 0.058), Vector3(0, -0.806, -0.006), dark)
+	_red_lock = Node3D.new()
+	_red_lock.name = "ScabbardLatch"
+	_red_lock.position = Vector3(0.046, -0.026, 0.030)
+	_red_scabbard.add_child(_red_lock)
+	_box(_red_lock, Vector3(0.031, 0.058, 0.020), Vector3(0.010, -0.020, 0.003), vermilion)
+	_box(_red_lock, Vector3(0.027, 0.014, 0.025), Vector3(0.013, 0.005, 0.004), actuator)
+
+
+func _build_katana_variants() -> void:
+	var black := _material(Color("181d26"),0.23,0.41)
+	var silver := _material(Color("b5c1cf"),0.58,0.27)
+	var red := _material(Color("ae382b"),0.53,0.41)
+	var gold := _material(Color("d6a755"),0.65,0.34)
+	var ivory := _material(Color("dedac4"),0.18,0.52)
+	var cyan := _material(Color("4ccedb"),0.33,0.28,true)
+	var violet := _material(Color("7977cc"),0.42,0.34,true)
+	var jade := _material(Color("507f7b"),0.52,0.34)
+	_build_factory_variants(black,silver,red,gold,ivory,cyan)
+	_long_blade = _variant_root(_drawn,"LongKatana")
+	_long_sheath = _variant_root(_scabbard,"LongKatanaSheath")
+	_yamato_blade = _variant_root(_drawn,"RiftKatana")
+	_yamato_sheath = _variant_root(_scabbard,"RiftKatanaSheath")
+	for blade: Node3D in [_long_blade,_yamato_blade]:
+		var rift := blade == _yamato_blade
+		var sheath := _yamato_sheath if rift else _long_sheath
+		var accent := violet if rift else jade
+		var fittings := gold if rift else jade
+		var wrap := ivory if rift else black
+		var profile: Array[Vector3] = [Vector3(0,0.046,0.025),Vector3(0,0.046,0.30),Vector3(0,0.046,0.86),Vector3(0,0.050,1.30),Vector3(0,0.032,1.46),Vector3(0,0.0004,LONG_EDGE_TIP.y)]
+		_blade_insert(blade,profile,silver,ivory if rift else silver,accent)
+		_box(blade,Vector3(0.042,0.30,0.043),Vector3(0,-0.150,0),black)
+		_box(blade,Vector3(0.053,0.027,0.050),Vector3(0,-0.305,0),accent)
+		_box(blade,Vector3(0.060,0.011,0.061),Vector3(0,0.015,0),gold if rift else silver)
+		_box(blade,Vector3(0.113,0.019,0.082),Vector3(0,-0.005,0),fittings)
+		_box(blade,Vector3(0.077,0.016,0.100),Vector3(0,-0.006,0),fittings)
+		for index in range(9):
+			for side in [-1.0,1.0]:
+				var weave := _box(blade,Vector3(0.029,0.014,0.004),Vector3(side*0.010,-0.044-float(index)*0.028+side*0.006,0.024),wrap)
+				weave.rotation.z = side*(0.73 if rift else 0.32)
+		_box(blade,Vector3(0.003,1.26,0.002),Vector3(0.032,0.687,0.006),accent)
+		_box(sheath,Vector3(0.103,1.54,0.048),Vector3(-0.018,-0.77,-0.006),black)
+		_box(sheath,Vector3(0.108,0.041,0.054),Vector3(-0.018,-0.020,0),fittings)
+		_box(sheath,Vector3(0.097,0.062,0.055),Vector3(-0.014,-1.513,0),fittings)
+		_box(sheath,Vector3(0.005,1.37,0.006),Vector3(-0.054,-0.79,0.023),accent)
+		if rift:
+			for index in range(4):
+				_box(sheath,Vector3(0.087,0.013,0.054),Vector3(0,-0.23-float(index)*0.025,0),ivory).rotation.z = 0.31
+			_box(sheath,Vector3(0.024,0.285,0.014),Vector3(0.033,-0.36,0.017),black).rotation.z = -0.15
+		else:
+			for at in [-0.34,-0.93,-1.34]:
+				_box(sheath,Vector3(0.084,0.025,0.056),Vector3(0,at,0),jade)
+	_build_double_energy_grip(black,silver,red)
+
+
+func _build_factory_variants(black: StandardMaterial3D, silver: StandardMaterial3D, red: StandardMaterial3D, gold: StandardMaterial3D, ivory: StandardMaterial3D, cyan: StandardMaterial3D) -> void:
+	_vermilion_blade = _variant_root(_drawn,"VermilionForgeBlade")
+	_vermilion_sheath = _variant_root(_scabbard,"VermilionForgeSheath")
+	_frost_blade = _variant_root(_drawn,"FrostSpineBlade")
+	_frost_sheath = _variant_root(_scabbard,"FrostCeramicSheath")
+	var forge := _material(Color("593330"),0.63,0.38)
+	var ceramic := _material(Color("cbdce4"),0.38,0.31)
+	var blue := _material(Color("4a7199"),0.58,0.29)
+	var red_profile: Array[Vector3] = [Vector3(-0.023,0.040,0.025),Vector3(-0.023,0.048,0.21),Vector3(-0.019,0.046,0.54),Vector3(-0.013,0.037,0.68),Vector3(-0.009,0.021,0.75),Vector3(0,0.0004,0.86)]
+	var cold_profile: Array[Vector3] = [Vector3(-0.013,0.031,0.025),Vector3(-0.015,0.040,0.11),Vector3(-0.017,0.041,0.37),Vector3(-0.012,0.040,0.64),Vector3(-0.008,0.036,0.76),Vector3(0,0.0004,0.86)]
+	_blade_insert(_vermilion_blade,red_profile,forge,gold,black)
+	_blade_insert(_frost_blade,cold_profile,blue,ceramic,silver)
+	_box(_vermilion_blade,Vector3(0.040,0.215,0.040),Vector3(0,-0.102,0),black)
+	_box(_frost_blade,Vector3(0.038,0.212,0.038),Vector3(0,-0.103,0),black)
+	_box(_vermilion_blade,Vector3(0.111,0.020,0.073),Vector3(0,-0.004,0),gold)
+	_box(_frost_blade,Vector3(0.063,0.026,0.059),Vector3(0,-0.009,0),ceramic)
+	for side in [-1.0,1.0]:
+		_box(_vermilion_blade,Vector3(0.030,0.071,0.022),Vector3(side*0.053,0.019,0),red).rotation.z = side*0.51
+		_box(_frost_blade,Vector3(0.022,0.068,0.052),Vector3(side*0.046,0.010,0),silver).rotation.z = side*0.24
+		_box(_frost_blade,Vector3(0.012,0.147,0.008),Vector3(side*0.020,-0.116,0.021),ceramic)
+	_box(_vermilion_blade,Vector3(0.047,0.022,0.044),Vector3(0,-0.215,0),gold)
+	_box(_frost_blade,Vector3(0.048,0.021,0.047),Vector3(0,-0.219,0),silver)
+	for index in range(7):
+		_box(_vermilion_blade,Vector3(0.034,0.010,0.004),Vector3(0,-0.034-float(index)*0.025,0.022),gold if index%3 == 0 else red).rotation.z = -0.52
+	for at in [0.16,0.24,0.32,0.40,0.59,0.66]:
+		_box(_frost_blade,Vector3(0.007,0.047,0.003),Vector3(0.024,at,0.0067),cyan).rotation.z = -0.16
+	_box(_vermilion_sheath,Vector3(0.087,0.88,0.055),Vector3(0,-0.455,-0.011),red)
+	_box(_vermilion_sheath,Vector3(0.065,0.72,0.018),Vector3(0,-0.473,0.014),black)
+	_box(_vermilion_sheath,Vector3(0.105,0.042,0.059),Vector3(0,-0.027,0),gold)
+	_box(_vermilion_sheath,Vector3(0.095,0.038,0.064),Vector3(0,-0.881,0),gold)
+	_box(_frost_sheath,Vector3(0.075,0.884,0.060),Vector3(0,-0.458,-0.013),black)
+	_box(_frost_sheath,Vector3(0.031,0.73,0.014),Vector3(0,-0.48,0.016),blue)
+	_box(_frost_sheath,Vector3(0.091,0.042,0.050),Vector3(0,-0.030,0),silver)
+	_box(_frost_sheath,Vector3(0.077,0.037,0.057),Vector3(0,-0.87,0),silver)
+	for index in range(6):
+		var at := -0.157-float(index)*0.127
+		_box(_frost_sheath,Vector3(0.088,0.086,0.021),Vector3(0,at,0.016),ceramic).rotation.z = 0.27 if index%2 == 0 else -0.27
+		_box(_frost_sheath,Vector3(0.005,0.055,0.005),Vector3(-0.031,at,0.030),cyan)
+		for side in [-1.0,1.0]:
+			_box(_vermilion_sheath,Vector3(0.034,0.059,0.013),Vector3(side*0.020,at,0.029),gold if index%2 == 0 else red).rotation.z = side*0.35
+		_box(_vermilion_sheath,Vector3(0.009,0.028,0.009),Vector3(0,at-0.012,0.037),ivory)
+
+
+func _build_double_energy_grip(black: StandardMaterial3D, silver: StandardMaterial3D, red: StandardMaterial3D) -> void:
+	_maul_grip = _variant_root(_drawn,"DoubleEnergyHilt")
+	var luminous := _material(Color("ff342a"),0.0,0.3,true)
+	luminous.emission_energy_multiplier = 2.2
+	var core := _material(Color("ffdcca"),0.0,0.3,true)
+	core.emission_energy_multiplier = 2.0
+	var glow := _material(Color("ff2015"),0.0,0.1,true)
+	glow.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	glow.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	glow.albedo_color.a = 0.24
+	_box(_maul_grip,Vector3(0.050,0.365,0.059),Vector3(0,-0.157,0),black)
+	for index in range(8):
+		_box(_maul_grip,Vector3(0.064,0.015,0.066),Vector3(0,-0.040-float(index)*0.034,0),silver if index in [0,7] else red)
+	for tip in [0.026,-0.348]:
+		_box(_maul_grip,Vector3(0.081,0.050,0.076),Vector3(0,tip,0),silver)
+		for side in [-1.0,1.0]:
+			_box(_maul_grip,Vector3(0.013,0.065,0.056),Vector3(side*0.034,tip,0),black)
+	for side: float in [1.0,-1.0]:
+		var emitter := _variant_root(_maul_grip,"PrimaryEmitter" if side > 0.0 else "RearEmitter")
+		emitter.position.y = 0.050 if side > 0.0 else -0.371
+		_maul_emitters.append(emitter)
+		var length := LONG_EDGE_TIP.y-0.050 if side > 0.0 else 1.059
+		var center := length*0.5*side
+		_box(emitter,Vector3(0.052,length,0.045),Vector3(0,center,0),glow)
+		_box(emitter,Vector3(0.030,length,0.031),Vector3(0,center,0),luminous)
+		_box(emitter,Vector3(0.012,length-0.027,0.035),Vector3(0,center,0),core)
+	_build_alternate_alert(_maul_grip,Vector3(0,-0.11,0.036),1.0)
+
+
+func _variant_root(parent: Node3D, model_name: String) -> Node3D:
+	var node := Node3D.new()
+	node.name = model_name
+	parent.add_child(node)
+	return node
+
+
+func _blade_insert(parent: Node3D, profile: Array[Vector3], face: StandardMaterial3D, bevel: StandardMaterial3D, spine: StandardMaterial3D) -> void:
+	var blade := MeshInstance3D.new()
+	blade.mesh = _blade_mesh(profile)
+	blade.set_surface_override_material(0,face)
+	blade.set_surface_override_material(1,bevel)
+	blade.set_surface_override_material(2,spine)
+	blade.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(blade)
+
+
+func _build_dual_sword(root: Node3D, hand: int, steel: StandardMaterial3D, dark: StandardMaterial3D, ivory: StandardMaterial3D, copper: StandardMaterial3D) -> void:
+	var metal := Node3D.new()
+	root.add_child(metal)
+	_dual_metal.append(metal)
+	_make_grip(metal, -1.0, steel, dark, _edge_material, dark, ivory, copper)
+	var blade := MeshInstance3D.new()
+	blade.mesh = _blade_mesh()
+	blade.set_surface_override_material(0, _material(Color("86939a"), 0.71, 0.31))
+	blade.set_surface_override_material(1, _material(Color("c1dae2"), 0.76, 0.24))
+	blade.set_surface_override_material(2, dark)
+	blade.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	metal.add_child(blade)
+	_box(metal, Vector3(0.022, 0.43, 0.006), Vector3(0.012, 0.29, 0.010), dark)
+	var plasma := Node3D.new()
+	root.add_child(plasma)
+	_dual_plasma.append(plasma)
+	var blade_tint := Color("44c4ff") if hand < 0 else Color("ffc457")
+	var collar := _material(Color("7298ac") if hand < 0 else Color("b49153"), 0.7, 0.24)
+	_box(plasma, Vector3(0.044, 0.196, 0.039), Vector3(0.0, -0.107, 0.0), dark)
+	_box(plasma, Vector3(0.070 if hand < 0 else 0.084, 0.033, 0.059), Vector3(0.0, -0.009, 0.0), collar)
+	_box(plasma, Vector3(0.052, 0.026, 0.049), Vector3(0.0, -0.196, 0.0), collar)
+	for rib in range(5):
+		_box(plasma, Vector3(0.052, 0.008, 0.044), Vector3(0.0, -0.045 - rib * 0.026, 0.0), steel)
+	if hand < 0:
+		_box(plasma, Vector3(0.015, 0.083, 0.041), Vector3(-0.026, -0.083, 0), collar)
+	else:
+		_box(plasma, Vector3(0.026, 0.053, 0.049), Vector3(0.025, -0.143, 0), collar)
+	var light := Node3D.new()
+	light.name = "PlasmaBlade"
+	light.position.y = EDGE_BASE.y
+	plasma.add_child(light)
+	var emitter := _material(blade_tint, 0.0, 0.28, true)
+	emitter.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	var core := _material(Color.WHITE, 0.0, 0.25, true)
+	core.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	var halo := _new_viewmodel_material()
+	halo.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	halo.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	halo.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	halo.albedo_color = Color(blade_tint, 0.22)
+	_box(light, Vector3(0.051, 0.831, 0.034), Vector3(0, 0.416, 0), halo)
+	_box(light, Vector3(0.032, 0.828, 0.022), Vector3(0, 0.414, 0), emitter)
+	_box(light, Vector3(0.015, 0.817, 0.004), Vector3(0, 0.413, 0.012), core)
+	_box(light, Vector3(0.015, 0.817, 0.004), Vector3(0, 0.413, -0.012), core)
+	_build_alternate_alert(root, Vector3(0.0, -0.118, 0.027), 0.80)
+
+
+func _build_heavy_sword(dark: StandardMaterial3D, steel: StandardMaterial3D) -> void:
+	_heavy_shape = Node3D.new()
+	_heavy_shape.name = "HeavyBlade"
+	add_child(_heavy_shape)
+	_box(_heavy_shape, Vector3(0.054, 0.265, 0.049), Vector3(0.064, -0.108, 0), dark)
+	_box(_heavy_shape, Vector3(0.158, 0.033, 0.071), Vector3(0.047, 0.003, 0), steel)
+	_box(_heavy_shape, Vector3(0.078, 0.023, 0.063), Vector3(0.064, -0.235, 0), steel)
+	for rib in range(5):
+		_box(_heavy_shape, Vector3(0.065, 0.011, 0.055), Vector3(0.064, -0.036 - rib * 0.032, 0), dark)
+	var edge := Vector3(0.0, 0.82, 0)
+	var tip := Vector3(0.012, 0.86, 0)
+	var corner := Vector3(0.205, 0.706, 0)
+	var face := SurfaceTool.new()
+	var bevel := SurfaceTool.new()
+	face.begin(Mesh.PRIMITIVE_TRIANGLES)
+	bevel.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for side in [-1.0, 1.0]:
+		var z := float(side) * 0.022
+		var inner := Vector3(0.032, EDGE_BASE.y, z)
+		var shoulder := Vector3(0.205, EDGE_BASE.y, z)
+		var top := Vector3(0.205, corner.y, z)
+		var point := Vector3(0.035, 0.828, z)
+		_blade_quad(face, inner, shoulder, top, point, side < 0.0)
+		_blade_quad(bevel, EDGE_BASE, inner, point, edge, side < 0.0)
+		_blade_quad(bevel, edge, point, top, tip, side < 0.0)
+	_blade_quad(face, Vector3(0.205, EDGE_BASE.y, -0.022), Vector3(0.205, EDGE_BASE.y, 0.022), Vector3(0.205, corner.y, 0.022), Vector3(0.205, corner.y, -0.022), true)
+	var mesh := MeshInstance3D.new()
+	var forged := face.commit()
+	bevel.commit(forged)
+	mesh.mesh = forged
+	_heavy_finish = _material(Color("687c87"), 0.68, 0.39)
+	_heavy_finish.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var honed := _material(Color("c4cbd0"), 0.48, 0.26, true)
+	honed.emission = Color("7e91a5")
+	honed.emission_energy_multiplier = 0.12
+	honed.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mesh.set_surface_override_material(0, _heavy_finish)
+	mesh.set_surface_override_material(1, honed)
+	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_heavy_shape.add_child(mesh)
+	_heavy_bridge = Node3D.new()
+	_heavy_bridge.name = "BridgeRivets"
+	_heavy_shape.add_child(_heavy_bridge)
+	_box(_heavy_bridge, Vector3(0.046, 0.61, 0.055), Vector3(0.167, 0.362, 0), dark)
+	var rail := _material(Color("827063"), 0.40, 0.42, true)
+	rail.emission = Color("a06838")
+	rail.emission_energy_multiplier = 0.13
+	for side in [-1.0, 1.0]:
+		_box(_heavy_bridge, Vector3(0.010, 0.60, 0.004), Vector3(0.144, 0.362, float(side) * 0.028), rail)
+	for row in range(6):
+		_box(_heavy_bridge, Vector3(0.016, 0.014, 0.060), Vector3(0.168, 0.105 + 0.103 * row, 0), rail)
+	_heavy_coil = _material(Color("a96439"), 0.48, 0.4, true)
+	for x in [0.057, 0.123]:
+		_box(_heavy_shape, Vector3(0.033, 0.180, 0.060), Vector3(x, 0.114, 0), dark)
+		var slider := Node3D.new()
+		slider.position = Vector3(x, 0.139, 0)
+		_heavy_shape.add_child(slider)
+		_heavy_dampers.append(slider)
+		_box(slider, Vector3(0.020, 0.086, 0.065), Vector3.ZERO, steel)
+		_box(slider, Vector3(0.024, 0.015, 0.070), Vector3(0, -0.009, 0), _heavy_coil)
+	_build_alternate_alert(_heavy_shape, Vector3(0.065, -0.112, 0.033), 0.90)
+
+
+func _build_alternate_alert(parent: Node3D, center: Vector3, width: float) -> void:
+	for offset in [-0.008, 0.008]:
+		_alternate_alert_bands.append(_box(parent, Vector3(0.033 * width, 0.004, 0.004), center + Vector3(0, offset, 0), _sheath_ivory))
+	for source in [_sheath_alert_halo, _sheath_outer_halo]:
+		var halo := MeshInstance3D.new()
+		halo.mesh = source.mesh
+		halo.material_override = source.material_override
+		halo.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		halo.position = center + Vector3(0, 0, 0.003)
+		halo.scale = source.scale
+		parent.add_child(halo)
+		halo.visible = false
+		if source == _sheath_alert_halo:
+			_alternate_alert_halos.append(halo)
+		else:
+			_alternate_outer_halos.append(halo)
+
+
+func populate_shop_preview(parent: Node3D) -> void:
+	# Shop poses reuse visible production meshes and their exact materials.
+	var flat := Basis(Vector3.BACK,-PI*0.5)*Basis(Vector3.UP,-0.17)
+	match _weapon_family:
+		"dual":
+			for index in range(2):
+				var sword := _dual_left if index == 0 else _dual_right
+				var stance := Basis(Vector3.BACK,-1.30-float(index)*0.48)*Basis(Vector3.UP,-0.26)
+				_copy_shop_meshes(sword,parent,Transform3D(stance,Vector3(-0.34,0.22-float(index)*0.44,0.08*float(index))))
+		"heavy":
+			_copy_shop_meshes(_heavy_shape,parent,Transform3D(flat,Vector3(-0.29,0.05,0)))
+		_:
+			var offset := -0.59 if _weapon_family == "long" else -0.32
+			if _weapon_skin == "maul": offset = -0.06
+			_copy_shop_meshes(_drawn,parent,Transform3D(flat,Vector3(offset,0.12,0.09)))
+			if _scabbard.visible:
+				var sheath_pose := Transform3D(Basis(Vector3.BACK,PI*0.5)*Basis(Vector3.UP,0.12),Vector3(offset+0.04,-0.18,-0.015))
+				_copy_shop_meshes(_scabbard,parent,sheath_pose)
+
+
+func _copy_shop_meshes(source: Node3D, parent: Node3D, pose: Transform3D) -> void:
+	for child in source.get_children():
+		if not child is Node3D or not child.visible or child in _blade_cut_markers: continue
+		var local_pose: Transform3D = child.transform
+		if child in _maul_emitters or child.name == &"PlasmaBlade": local_pose.basis = local_pose.basis.orthonormalized()
+		var staged_pose := pose*local_pose
+		if child is MeshInstance3D:
+			var copy := MeshInstance3D.new()
+			copy.mesh = child.mesh
+			copy.material_override = child.material_override
+			for index in range(child.get_surface_override_material_count()):
+				copy.set_surface_override_material(index,child.get_surface_override_material(index))
+			copy.transform = staged_pose
+			copy.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			parent.add_child(copy)
+		else:
+			_copy_shop_meshes(child,parent,staged_pose)
+
+
+func _sync_weapon_models() -> void:
+	var factory := _weapon_family == "factory"
+	var extended := _weapon_family == "long"
+	var original := factory and _weapon_skin not in ["vermilion","frost"]
+	_scabbard.visible = factory or (extended and _weapon_skin != "maul")
+	_red_scabbard.visible = original and _weapon_skin == "red_scabbard"
+	for child in _katana_meshes:
+		child.visible = original
+	for child in _factory_sheath_meshes:
+		child.visible = original
+	_vermilion_sheath.visible = factory and _weapon_skin == "vermilion"
+	_vermilion_blade.visible = _vermilion_sheath.visible
+	_frost_sheath.visible = factory and _weapon_skin == "frost"
+	_frost_blade.visible = _frost_sheath.visible
+	_long_sheath.visible = extended and _weapon_skin not in ["yamato","maul"]
+	_long_blade.visible = _long_sheath.visible
+	_yamato_sheath.visible = extended and _weapon_skin == "yamato"
+	_yamato_blade.visible = _yamato_sheath.visible
+	_maul_grip.visible = extended and _weapon_skin == "maul"
+	_dual_left.visible = _weapon_family == "dual"
+	_dual_right.visible = _dual_left.visible
+	for node in _dual_metal:
+		node.visible = _weapon_skin != "plasma"
+	for node in _dual_plasma:
+		node.visible = _weapon_skin == "plasma"
+	_heavy_shape.visible = _weapon_family == "heavy"
+	_heavy_bridge.visible = _weapon_skin == "bridge"
+	_heavy_finish.albedo_color = Color("777b7d") if _weapon_skin == "bridge" else Color("687c87")
+
+
+func _dual_rest(hand: int) -> Transform3D:
+	return _grip_pose(Vector3(hand * 0.44, -0.39, -0.91), Vector3(-0.32, -hand * 0.21, hand * 0.42))
+
+
+func _dual_guard(hand: int) -> Transform3D:
+	return _grip_pose(Vector3(hand * 0.38, -0.39, -1.03 - hand * 0.048), Vector3(-0.14, hand * 0.12, hand * 0.88))
+
+
+func _heavy_charge_pose() -> Transform3D:
+	var pull := smoothstep(0.0,1.0,_weapon_charge)
+	var away := Vector3(-_weapon_aim.x,_weapon_aim.y,0.0)
+	var grip := Vector3(0.42,-0.37,-0.86)+Vector3(0.04,0.16,0.14)*pull+away*0.26*pull
+	var ready_angle := atan2(-_weapon_aim.x,-_weapon_aim.y)-0.33*signf(_weapon_aim.x)
+	return _grip_pose(grip,Vector3(-0.48+0.39*pull,-0.13-0.42*pull,lerp_angle(0.48,ready_angle,pull)))
+
+
+func _heavy_contact_pose(aim: Vector2) -> Transform3D:
+	var angle := atan2(-aim.x,-aim.y)
+	var side := -1.0 if aim.x < 0.0 else 1.0
+	var basis := Basis(Quaternion.from_euler(Vector3(0.13,-0.14*side,angle)))
+	return Transform3D(basis,Vector3(0,0,-1.05)-basis*ACTIVE_CUT_POINT)
+
+
+func _heavy_slash_keys(release_pose: Transform3D, charge: float) -> Array[Dictionary]:
+	var angle := atan2(-_weapon_aim.x, -_weapon_aim.y)
+	var side := -1.0 if _weapon_aim.x < 0.0 else 1.0
+	var contact := _heavy_contact_pose(_weapon_aim)
+	var travel := Vector3(_weapon_aim.x,-_weapon_aim.y,0.0)
+	var grip := contact*GRIP_POINT
+	var follow := _grip_pose(grip+travel*lerpf(0.39,0.66,charge)+Vector3(0,-0.07,0.14),Vector3(-0.31,-0.64*side,angle-0.84*side))
+	var brake := _grip_pose(follow*GRIP_POINT+travel*0.095+Vector3(0,-0.07,0.07),Vector3(-0.43,-0.52*side,angle-1.07*side))
+	var recovery := _grip_pose(Vector3(0.42,-0.37,-0.86),Vector3(-0.48,-0.13,0.48))
+	return [
+		_arm_key(0.0,release_pose,Vector3(0.04,0.12*side,-0.14*side)),
+		_arm_key(_heavy_contact_time,contact,Vector3(0.16,0.20*side,-0.24*side)),
+		_arm_key(_heavy_contact_time+0.068,follow,Vector3(0.29,0.28*side,-0.35*side)),
+		_arm_key(_light_slash_times.y,brake,Vector3(0.32,0.25*side,-0.36*side)),
+		_arm_key(_light_slash_duration,recovery,Vector3.ZERO),
+	]
+
+
+func _update_weapon_presentation(real_delta: float) -> void:
+	match _weapon_family:
+		"factory":
+			if _weapon_skin == "red_scabbard":
+				var latch_open := 1.0 if _mode != "sheathed" else 1.0 - smoothstep(SHEATHE_INSERT_TIME, SHEATHE_TIME, _sheathe_time) if _sheathing else 0.0
+				_red_lock.rotation.x = lerpf(_red_lock.rotation.x, -0.85 * latch_open, 1.0 - exp(-real_delta * 45.0))
+		"dual":
+			_update_dual_swords(real_delta)
+		"heavy":
+			_heavy_shape.transform = _drawn.transform
+			for slider in _heavy_dampers:
+				slider.position.y = 0.139 - 0.045 * _weapon_charge
+			_heavy_coil.emission_energy_multiplier = 0.35 + _weapon_charge * 1.20
+		"long":
+			if _weapon_skin == "maul":
+				var shown := is_visible_in_tree()
+				if shown and not _maul_visible:
+					_maul_ignition = 0.0
+					animation_event.emit(&"plasma_ignite",1.05)
+				_maul_visible = shown
+				_maul_ignition = minf(1.0,_maul_ignition+real_delta*8.5) if shown else 0.0
+				for emitter in _maul_emitters: emitter.scale.y = maxf(0.018,_maul_ignition)
+
+
+func _update_dual_swords(real_delta: float) -> void:
+	for hand in [-1, 1]:
+		var root := _dual_left if hand < 0 else _dual_right
+		if _mode == "parry":
+			var guard := _dual_guard(hand)
+			guard.origin += _recoil
+			root.transform = root.transform.interpolate_with(guard, 1.0 - exp(-real_delta * 36.0))
+		elif _weapon_hand == hand and _mode in ["slash", "held"]:
+			root.transform = _drawn.transform
+		else:
+			root.transform = root.transform.interpolate_with(_dual_rest(hand), 1.0 - exp(-real_delta * 15.0))
+	if _mode not in ["slash", "held"]:
+		_drawn.transform = (_dual_left if _weapon_hand < 0 else _dual_right).transform
+	if _weapon_skin != "plasma":
+		return
+	var shown := is_visible_in_tree()
+	if shown and not _plasma_visible:
+		_plasma_ignition = 0.0
+		animation_event.emit(&"plasma_ignite", 0.90)
+	_plasma_visible = shown
+	if shown and _plasma_ignition < 1.0:
+		_plasma_ignition = minf(1.0, _plasma_ignition + real_delta * 8.0) if _mode == "sheathed" else 1.0
+		for node in _dual_plasma:
+			var blade := node.get_node("PlasmaBlade") as Node3D
+			blade.scale.y = maxf(0.01, _plasma_ignition)
 
 
 func _build_sheath_alert(ivory: StandardMaterial3D) -> void:
@@ -326,8 +999,14 @@ func set_sheath_alert(level: float) -> void:
 		_sheath_alert_halo.visible = active
 		for band in _sheath_alert_bands:
 			band.material_override = _sheath_alert_material if active else _sheath_ivory
+		for band in _alternate_alert_bands:
+			band.material_override = _sheath_alert_material if active else _sheath_ivory
+		for halo in _alternate_alert_halos:
+			halo.visible = active
 	_sheath_alert_level = strength
 	_sheath_outer_halo.visible = strength > 1.0
+	for halo in _alternate_outer_halos:
+		halo.visible = strength > 1.0
 	if not active:
 		return
 
@@ -337,11 +1016,15 @@ func set_sheath_alert(level: float) -> void:
 	_sheath_alert_material.emission_energy_multiplier = 0.28 * strength + 2.4 * peak
 	_sheath_halo_material.albedo_color = Color(1.0, lerpf(0.055, 0.13, peak), 0.018, 0.10 * strength + 0.60 * peak)
 	_sheath_alert_halo.scale = Vector3.ONE * lerpf(0.86, 1.55, peak)
+	for halo in _alternate_alert_halos:
+		halo.scale = _sheath_alert_halo.scale
 	_sheath_outer_halo_material.albedo_color = Color(1.0, 0.025, 0.012, 0.72 * peak)
 
 
 func set_pose(mode: String, progress: float = 0.0, stroke: Vector2 = Vector2.ZERO) -> void:
 	if mode != _mode:
+		_heavy_contact_pending = false
+		_heavy_contact_frame = false
 		_slash_contact_hold = 0.0
 		var previous_mode := _mode
 		var from_scabbard := previous_mode == "sheathed" and (not _sheathing or _sheathe_time >= 0.35)
@@ -364,9 +1047,9 @@ func set_pose(mode: String, progress: float = 0.0, stroke: Vector2 = Vector2.ZER
 				_sheathing = false
 				_parry_reacting = false
 				_guard_keys = _make_guard_keys(_action_from)
-				animation_event.emit(&"guard_raise", 1.0)
-				if from_scabbard:
-					animation_event.emit(&"unsheathe", 0.75)
+				animation_event.emit(&"plasma_cross" if _weapon_skin == "plasma" else &"guard_raise", 1.0)
+				if from_scabbard and _scabbard.visible:
+					animation_event.emit(&"red_draw" if _weapon_skin == "red_scabbard" else &"unsheathe", 0.75)
 			"sheathed":
 				_sheathing = true
 				_sheathe_time = 0.0
@@ -379,6 +1062,7 @@ func set_pose(mode: String, progress: float = 0.0, stroke: Vector2 = Vector2.ZER
 	if mode != "held" and is_instance_valid(_held_voxel_visual):
 		_held_voxel_visual.visible = false
 		_held_voxels.visible_instance_count = 0
+	_update_blade_cut_marker()
 
 
 func get_light_slash_count() -> int:
@@ -386,7 +1070,15 @@ func get_light_slash_count() -> int:
 
 
 func get_light_slash_definition(index: int) -> Dictionary:
-	return LIGHT_SLASHES[posmod(index, LIGHT_SLASHES.size())].duplicate(true)
+	var definition := LIGHT_SLASHES[posmod(index, LIGHT_SLASHES.size())].duplicate(true)
+	if _weapon_family == "dual" and signf(definition.swing.x) == float(_weapon_hand):
+		definition.swing.x *= -1.0
+		definition.lean.y *= -1.0
+		definition.elbow *= Vector3(1, -1, -1)
+		for key in range(definition.arcs.size()):
+			definition.arcs[key].x *= -1.0
+			definition.wrists[key] *= Vector3(1, -1, -1)
+	return definition
 
 
 func play_slash(direction: Vector2 = Vector2(1.0, -0.45), style_index: int = -1) -> void:
@@ -418,17 +1110,21 @@ func play_slash(direction: Vector2 = Vector2(1.0, -0.45), style_index: int = -1)
 	_drawn.transform = _sample_arm_keys(_slash_keys, 0.0)
 	_animation_phase = "draw_contact"
 	_draw_connection.clear()
-	var mouth := _scabbard.transform * Vector3(0.0, -0.015, 0.018)
-	var before := mouth if from_scabbard else previous * ACTIVE_CUT_POINT
-	var contact := _drawn.transform * ACTIVE_CUT_POINT
-	var control := mouth if from_scabbard else before.lerp(contact, 0.4) + Vector3(0.0, -0.03, -0.06)
+	var mouth := _scabbard.transform*Vector3(0,-0.015,0.018)
+	var sheath_draw := from_scabbard and _scabbard.visible
+	var before := mouth if sheath_draw else previous*_blade_contact()
+	var contact := _drawn.transform*_blade_contact()
+	var control := mouth if sheath_draw else before.lerp(contact, 0.4) + Vector3(0.0, -0.03, -0.06)
 	for index in range(10):
 		var weight := float(index) / 9.0
 		_draw_connection.append(before.bezier_interpolate(control, control.lerp(contact, 0.6), contact, weight))
 	_trail_samples.clear()
 	_trail_samples.append({"point": contact, "age": 0.0})
-	if from_scabbard:
-		animation_event.emit(&"unsheathe", 1.0)
+	if sheath_draw:
+		animation_event.emit(&"red_draw" if _weapon_skin == "red_scabbard" else &"unsheathe", 1.0)
+	if _weapon_family == "dual":
+		(_dual_left if _weapon_hand < 0 else _dual_right).transform = _drawn.transform
+	_update_blade_cut_marker()
 	animation_event.emit(&"blade_whoosh", 0.90 + float(_light_slash_style % 4) * 0.06)
 
 
@@ -436,11 +1132,24 @@ func get_light_slash_cut_path(viewport_size: Vector2) -> PackedVector2Array:
 	# This finite piece of the physical edge is already at the aim point in
 	# the input frame. No independent diagonal or projected sweep area deals
 	# damage, and every authored contact angle therefore cuts where it shows.
+	return _project_edge_path(_drawn.transform,viewport_size)
+
+
+func _project_edge_path(pose: Transform3D, viewport_size: Vector2) -> PackedVector2Array:
 	var canvas_size := get_viewport().get_visible_rect().size.max(Vector2.ONE)
 	var path := PackedVector2Array()
-	for height in [0.24, 0.37, ACTIVE_CUT_POINT.y, 0.65, 0.78]:
-		path.append(_camera.unproject_position(_drawn.to_global(Vector3(0.0, height, 0.0))) * viewport_size / canvas_size)
+	var heights := [0.23,0.47,LONG_CUT_POINT.y,1.08,1.35,1.50] if _weapon_family == "long" else [0.24,0.37,ACTIVE_CUT_POINT.y,0.65,0.78]
+	for height in heights:
+		path.append(_camera.unproject_position(to_global(pose*Vector3(0.0,height,0.0)))*viewport_size/canvas_size)
 	return path
+
+
+func _blade_tip() -> Vector3:
+	return LONG_EDGE_TIP if _weapon_family == "long" else EDGE_TIP
+
+
+func _blade_contact() -> Vector3:
+	return LONG_CUT_POINT if _weapon_family == "long" else ACTIVE_CUT_POINT
 
 
 func stroke_motion(from: Vector2, to: Vector2, viewport_size: Vector2) -> void:
@@ -476,14 +1185,14 @@ func adopt_current_held_pose(viewport_size: Vector2) -> Dictionary:
 	var canvas_size := get_viewport().get_visible_rect().size.max(Vector2.ONE)
 	var scale_to_view := viewport_size / canvas_size
 	var grip := _camera.unproject_position(_drawn.to_global(GRIP_POINT)) * scale_to_view
-	var tip := _camera.unproject_position(_drawn.to_global(EDGE_TIP)) * scale_to_view
+	var tip := _camera.unproject_position(_drawn.to_global(_blade_tip())) * scale_to_view
 	_grip_axis = (tip - grip).normalized()
 	_held_rest_roll = 0.0
 	var base := transform_for_grip(grip, _grip_axis, viewport_size).basis
 	_held_rest_roll = atan2(-base.z.dot(_drawn.basis.x), base.x.dot(_drawn.basis.x)) - (_recoil_angle.z + _recoil_angle.x) * 1.35
 	_last_grip = grip
 	_adopted_held_pose = true
-	return {"grip": grip, "axis": _grip_axis, "contact": _camera.unproject_position(_drawn.to_global(ACTIVE_CUT_POINT)) * scale_to_view}
+	return {"grip": grip, "axis": _grip_axis, "contact": _camera.unproject_position(_drawn.to_global(_blade_contact())) * scale_to_view}
 
 
 func set_grip_motion(grip: Vector2, direction: Vector2, travel_pixels: float, viewport_size: Vector2) -> void:
@@ -508,6 +1217,8 @@ func set_grip_motion(grip: Vector2, direction: Vector2, travel_pixels: float, vi
 		_last_held_whoosh = _elapsed
 	if _mode == "held" and is_instance_valid(_drawn):
 		_apply_held_pose(viewport_size)
+		if _weapon_family == "dual":
+			(_dual_left if _weapon_hand < 0 else _dual_right).transform = _drawn.transform
 
 
 func transform_for_grip(grip: Vector2, direction: Vector2, viewport_size: Vector2) -> Transform3D:
@@ -537,14 +1248,14 @@ func blade_segment_for_grip(grip: Vector2, direction: Vector2, viewport_size: Ve
 	var scale_to_view := viewport_size / canvas_size
 	return PackedVector2Array([
 		_camera.unproject_position(_camera.to_global(pose * EDGE_BASE)) * scale_to_view,
-		_camera.unproject_position(_camera.to_global(pose * EDGE_TIP)) * scale_to_view,
+		_camera.unproject_position(_camera.to_global(pose * _blade_tip())) * scale_to_view,
 	])
 
 
 func active_cut_point_for_grip(grip: Vector2, direction: Vector2, viewport_size: Vector2) -> Vector2:
 	var pose := transform_for_grip(grip, direction, viewport_size)
 	var canvas_size := get_viewport().get_visible_rect().size.max(Vector2.ONE)
-	return _camera.unproject_position(_camera.to_global(pose * ACTIVE_CUT_POINT)) * viewport_size / canvas_size
+	return _camera.unproject_position(_camera.to_global(pose * _blade_contact())) * viewport_size / canvas_size
 
 
 func grip_for_active_cut_point(point: Vector2, direction: Vector2, viewport_size: Vector2) -> Vector2:
@@ -569,18 +1280,18 @@ func get_grip_screen_position() -> Vector2:
 
 
 func get_blade_screen_direction() -> Vector2:
-	var tip := _camera.unproject_position(_drawn.to_global(EDGE_TIP))
+	var tip := _camera.unproject_position(_drawn.to_global(_blade_tip()))
 	return (tip - get_grip_screen_position()).normalized()
 
 
 func get_contact_world_position() -> Vector3:
-	return _drawn.to_global(ACTIVE_CUT_POINT)
+	return _drawn.to_global(_blade_contact())
 
 
 func get_animation_debug_state() -> Dictionary:
 	var style_name := String(LIGHT_SLASHES[_light_slash_style].name) if _light_slash_style >= 0 else ""
 	var screen := Rect2(Vector2.ZERO, get_viewport().get_visible_rect().size)
-	var tip := _camera.unproject_position(_drawn.to_global(EDGE_TIP))
+	var tip := _camera.unproject_position(_drawn.to_global(_blade_tip()))
 	var grip := get_grip_screen_position()
 	return {"phase": _animation_phase, "mode": _mode, "action_time": _action_time, "sheathing": _sheathing, "sheathe_time": _sheathe_time, "parry_reaction": _parry_reacting, "held_depth": _held_depth, "held_tilt": _held_tilt, "twist": _held_twist, "light_slash_style": _light_slash_style, "light_slash_name": style_name, "light_slash_duration": _light_slash_duration, "held_turn_sign": _held_turn_sign, "blade_tip_offscreen": not screen.has_point(tip), "hilt_onscreen": screen.has_point(grip), "ordinary_contact_hold": _slash_contact_hold, "ordinary_contact_drag_elapsed": _slash_contact_drag_elapsed}
 
@@ -609,12 +1320,17 @@ func _process(delta: float) -> void:
 		return
 	var real_delta := minf(delta / maxf(Engine.time_scale, 0.001), 0.1)
 	var action_delta := real_delta
+	var heavy_contact_frame := _heavy_contact_frame
+	_heavy_contact_frame = false
 	if _mode == "slash" and _slash_contact_hold > 0.0:
 		var resisted := minf(real_delta, _slash_contact_hold)
 		_slash_contact_hold -= resisted
 		_slash_contact_drag_elapsed += resisted
 		action_delta -= resisted * 0.86
-	_action_time += action_delta
+	if not heavy_contact_frame:
+		_action_time += action_delta
+		if _heavy_contact_pending:
+			_action_time = minf(_action_time,_heavy_contact_time-0.001)
 	_elapsed += real_delta
 	_motion_energy = move_toward(_motion_energy, 0.0, real_delta * 4.0)
 	# This decay affects sound only. Slow continuous precision cuts keep every
@@ -638,6 +1354,8 @@ func _process(delta: float) -> void:
 	# the tip alignment, independently of the cursor-owned physical wrist.
 	# Keep the two warning lights within the lower edge of the view when drawn.
 	var alert_drop := lerpf(1.0, 0.42, smoothstep(0.0, 0.44, _sheath_alert_level))
+	if _weapon_skin == "red_scabbard":
+		alert_drop *= 0.60
 	var drop_target := 0.0 if _mode == "sheathed" else alert_drop
 	_scabbard_drop = lerpf(_scabbard_drop, drop_target, 1.0 - exp(-real_delta * 28.0))
 	_scabbard.position = Vector3(0.47 + sway + _scabbard_drop * 0.10, -0.26 + sway * 0.5 - _scabbard_drop * 0.36, -0.76)
@@ -646,6 +1364,8 @@ func _process(delta: float) -> void:
 		"slash":
 			pose = _sample_arm_keys(_slash_keys, _action_time)
 			_animation_phase = "draw_contact" if _action_time < _light_slash_times.x else ("follow_through" if _action_time < _light_slash_times.y else ("wrist_recovery" if _action_time < _light_slash_times.z else "ready"))
+			if _heavy_contact_pending:
+				_animation_phase = "windup"
 			if _slash_contact_hold > 0.0:
 				_animation_phase = "contact_resistance"
 		"held":
@@ -661,17 +1381,24 @@ func _process(delta: float) -> void:
 				if _parry_reaction_time >= 0.18:
 					_parry_reacting = false
 		"sheathed":
-			if _sheathing:
+			if _weapon_family == "heavy":
+				_sheathing = false
+				pose = _heavy_charge_pose()
+				_animation_phase = "charge" if _weapon_charge > 0.0 else "docked"
+			elif _sheathing:
 				_sheathe_time += real_delta
 				pose = _sheathe_pose(_sheathe_time)
 				_animation_phase = "sheathe_align" if _sheathe_time < SHEATHE_INSERT_TIME else "sheathe_insert"
 				if _sheathe_time >= SHEATHE_TIME:
 					_sheathing = false
-					animation_event.emit(&"sheathe", 1.0)
+					if _scabbard.visible:
+						animation_event.emit(&"red_dock" if _weapon_skin == "red_scabbard" else &"sheathe", 1.0)
 			else:
 				pose = _dock_transform()
 				_animation_phase = "docked"
-	if _mode != "held":
+	if heavy_contact_frame:
+		_drawn.transform = pose
+	elif _mode != "held":
 		var grip := pose * GRIP_POINT
 		pose.basis = pose.basis * Basis(Quaternion.from_euler(_recoil_angle))
 		pose.origin = grip + _recoil - pose.basis * GRIP_POINT
@@ -679,6 +1406,8 @@ func _process(delta: float) -> void:
 			pose = _keep_hilt_adoptable(pose)
 			pose = _present_slash_face(pose)
 		_drawn.transform = pose
+	_update_weapon_presentation(real_delta)
+	_update_blade_cut_marker()
 	# The broad steel face must remain readable during the very fast ordinary
 	# drive. Precision-mode lighting and its exact pose are left unchanged.
 	# The same steel remains under the scene lighting in every mode. Its real
@@ -689,10 +1418,11 @@ func _process(delta: float) -> void:
 	_edge_material.emission_energy_multiplier = 0.38 + _motion_energy * 0.16 + _contact_energy * 0.35
 	_contact_flash.visible = _contact_energy > 0.2 and _mode != "sheathed"
 	if _contact_flash.visible:
-		_contact_flash.position = _drawn.transform * (ACTIVE_CUT_POINT + Vector3(0, 0, 0.012))
+		_contact_flash.position = _drawn.transform * (_blade_contact() + Vector3(0, 0, 0.012))
 		_contact_flash.rotation.z += real_delta * 17.0
 		_contact_flash.scale = Vector3.ONE * clampf(_contact_energy * 0.6, 0.2, 0.9)
-		_flash_material.albedo_color = Color(1.0, 0.78 if _contact_parried else 0.98, 0.42 if _contact_parried else 0.95, _contact_energy * 0.32)
+		var flash_tint := Color(1.0,0.78,0.42) if _contact_parried else _active_blade_tint().lerp(Color.WHITE,0.57)
+		_flash_material.albedo_color = Color(flash_tint,_contact_energy*0.32)
 
 
 func _apply_held_pose(viewport_size: Vector2) -> void:
@@ -703,6 +1433,8 @@ func _apply_held_pose(viewport_size: Vector2) -> void:
 
 
 func _dock_transform() -> Transform3D:
+	if _weapon_family == "long" and _weapon_skin == "maul":
+		return _grip_pose(Vector3(0.45,-0.50,-1.51),Vector3(-0.42,0.25,1.06))
 	return _scabbard.transform * Transform3D(Basis(Vector3.BACK, PI), Vector3.ZERO)
 
 
@@ -756,7 +1488,7 @@ func _make_slash_keys() -> Array[Dictionary]:
 	if _slash_inheritance > 0.0:
 		contact_basis = Basis(contact_basis.get_rotation_quaternion().slerp(_slash_predecessor.basis.get_rotation_quaternion(), _slash_inheritance))
 	var depth_offset := float((_combo_ordinal % 3) - 1) * 0.024 if _slash_inheritance > 0.0 else 0.0
-	var contact := Transform3D(contact_basis, Vector3(0.0, 0.0, -float(definition.depth) + depth_offset) - contact_basis * ACTIVE_CUT_POINT)
+	var contact := Transform3D(contact_basis, Vector3(0.0, 0.0, -float(definition.depth) + depth_offset) - contact_basis * _blade_contact())
 	var grip := contact * GRIP_POINT
 	var elbow: Vector3 = definition.elbow
 	var keys: Array[Dictionary] = [_arm_key(0.0, contact, elbow)]
@@ -866,7 +1598,7 @@ func _present_slash_face(pose: Transform3D) -> Transform3D:
 
 func _make_guard_keys(previous: Transform3D) -> Array[Dictionary]:
 	var basis := Basis(Quaternion.from_euler(Vector3(0.20, -0.13, -0.82)))
-	var guard := Transform3D(basis, Vector3(0.0, -0.045, -0.92) - basis * ACTIVE_CUT_POINT)
+	var guard := Transform3D(basis, Vector3(0.0, -0.045, -0.92) - basis * _blade_contact())
 	var guard_grip := guard * GRIP_POINT
 	var early := previous
 	early.basis = Basis(previous.basis.get_rotation_quaternion().slerp(guard.basis.get_rotation_quaternion(), 0.22))
@@ -895,14 +1627,17 @@ func _parry_reaction_pose(guard: Transform3D, time: float) -> Transform3D:
 
 func _sheathe_pose(time: float) -> Transform3D:
 	var dock := _dock_transform()
+	if _weapon_family == "long" and _weapon_skin == "maul":
+		return _sheathe_from.interpolate_with(dock,smoothstep(0.0,SHEATHE_TIME,time))
+	var insert_distance := _blade_tip().y+0.015
 	var before_insert := dock
-	before_insert.origin -= dock.basis.y * 0.875
+	before_insert.origin -= dock.basis.y * insert_distance
 	if time >= SHEATHE_INSERT_TIME:
 		# Once the tip enters, the real blade slides down the sheath's axis;
 		# independent elbow / wrist curves must not bend it through the sheath.
 		var inserted := clampf((time - SHEATHE_INSERT_TIME) / (SHEATHE_TIME - SHEATHE_INSERT_TIME), 0.0, 1.0)
 		inserted = inserted * inserted * (3.0 - 2.0 * inserted)
-		dock.origin -= dock.basis.y * (0.875 * (1.0 - inserted))
+		dock.origin -= dock.basis.y * (insert_distance * (1.0 - inserted))
 		return dock
 	var clear := _sheathe_from
 	var clear_grip := clear * GRIP_POINT + Vector3(0.075, -0.095, -0.10)
@@ -972,6 +1707,10 @@ func _build_held_voxels() -> void:
 
 
 func _held_voxel_edge_x(y: float) -> float:
+	if _weapon_family in ["heavy","long"]:
+		return 0.0
+	if _weapon_skin == "plasma":
+		return -0.026
 	# Exact authored sharp-edge stations from _blade_mesh(), not a second
 	# cutting line. The voxels only decorate the outward side of that edge.
 	for index in range(HELD_VOXEL_EDGE_STATIONS.size()-1):
@@ -983,15 +1722,19 @@ func _held_voxel_edge_x(y: float) -> float:
 func _update_held_voxels(real_delta: float) -> void:
 	if not is_instance_valid(_held_voxel_visual):
 		return
-	var active := _mode == "held"
+	var heavy_energy := _weapon_family == "heavy" and (_weapon_charge >= 0.12 or _mode == "slash")
+	var active := _mode == "held" or heavy_energy
 	_held_voxel_visual.visible = active
-	_held_voxels.visible_instance_count = HELD_VOXEL_CAPACITY if active else 0
+	var count := HELD_VOXEL_CAPACITY
+	if heavy_energy and _mode == "sheathed":
+		count = int(lerpf(28.0,76.0,_weapon_charge))
+	_held_voxels.visible_instance_count = count if active else 0
 	if not active or _held_voxel_frozen or real_delta <= 0.0:
 		return
 	# Hand-controlled blade energy stays readable in slow motion at ~half
 	# real time (0.493 at world scale .22), while hit-stop / pause freezes it.
 	_held_voxel_phase += real_delta*(0.35+0.65*_held_voxel_world_scale)
-	_held_voxel_motion = clampf(_motion_energy,0.0,1.0)
+	_held_voxel_motion = clampf(maxf(_motion_energy,_weapon_charge*0.62),0.0,1.0)
 	_held_voxel_contact = clampf(_contact_energy/1.6,0.0,1.0)
 	_write_held_voxels()
 
@@ -999,8 +1742,12 @@ func _update_held_voxels(real_delta: float) -> void:
 func _write_held_voxels() -> void:
 	var motion := _held_voxel_motion
 	var contact := _held_voxel_contact
-	var cool_white := Color(1.70,2.25,2.55)
-	var edge_blue := Color(1.10,1.90,2.35)
+	var core_tint := Color(1.70,2.25,2.55)
+	var edge_tint := Color(1.10,1.90,2.35)
+	if _weapon_skin != "factory":
+		var tint := _active_blade_tint()
+		core_tint = tint.lerp(Color.WHITE,0.32)*1.15
+		edge_tint = tint.lerp(Color.WHITE,0.07)*1.06
 	_held_voxel_live = 0
 	_held_voxel_bounds = AABB()
 	var cube := AABB(Vector3(-0.5,-0.5,-0.5),Vector3.ONE)
@@ -1030,15 +1777,16 @@ func _write_held_voxels() -> void:
 				size = 0.0
 			dimensions = Vector3(size*1.05,size*(1.35 if heavy else 1.0),size*0.85)
 			brightness = 1.0-age*0.55
+		if _weapon_family == "long": position.y *= 1.76
 		# Keep the real highlit one-point contact and its immediate blade band
 		# unobscured. No particles occupy the grip, guard or beyond the real tip.
-		if absf(position.y-ACTIVE_CUT_POINT.y) < 0.040:
+		if absf(position.y-_blade_contact().y) < 0.040:
 			dimensions = Vector3.ZERO
 		var spin := Vector3(seed_value.x*TAU,seed_value.y*TAU,seed_value.z*TAU)+Vector3(1.1,1.7,2.3)*_held_voxel_phase
 		var pose := Transform3D(Basis.from_euler(spin).scaled(dimensions),position)
 		_held_voxels.set_instance_transform(index,pose)
 		_held_voxel_cpu_poses[index] = pose
-		var tint := (cool_white if index < 24 or index >= 72 else edge_blue)*brightness
+		var tint := (core_tint if index < 24 or index >= 72 else edge_tint)*brightness
 		tint.a = 1.0
 		_held_voxels.set_instance_color(index,tint)
 		_held_voxel_cpu_colours[index] = tint
@@ -1047,6 +1795,10 @@ func _write_held_voxels() -> void:
 			_held_voxel_bounds = bounds if _held_voxel_live == 0 else _held_voxel_bounds.merge(bounds)
 			_held_voxel_live += 1
 	_held_voxel_uploads += 1
+
+
+func _active_blade_tint() -> Color:
+	return _blade_fx_secondary if _weapon_skin == "plasma" and _weapon_hand > 0 else _blade_fx_primary
 
 
 func get_held_voxel_fx_debug_state() -> Dictionary:
@@ -1079,7 +1831,7 @@ func _update_blade_trail(real_delta: float, resting: bool) -> void:
 		if float(_trail_samples[index].age) > 0.060:
 			_trail_samples.remove_at(index)
 	if not resting:
-		var contact: Vector3 = _drawn.transform * ACTIVE_CUT_POINT
+		var contact: Vector3 = _drawn.transform * _blade_contact()
 		if _trail_samples.is_empty() or contact.distance_to(_trail_samples[-1].point) > 0.008:
 			_trail_samples.append({"point": contact, "age": 0.0})
 	var draw_window := 0.042
@@ -1092,14 +1844,20 @@ func _update_blade_trail(real_delta: float, resting: bool) -> void:
 	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
 	if show_draw:
 		var draw_opacity := clampf(1.0 - _action_time / draw_window, 0.0, 1.0)
+		var draw_tint := Color(0.82,0.96,1.0) if _weapon_skin == "factory" else _active_blade_tint()
 		for index in range(_draw_connection.size() - 1):
-			_append_streak(surface, _draw_connection[index], _draw_connection[index + 1], 0.0028, Color(0.82, 0.96, 1.0, draw_opacity * 0.62))
+			_append_streak(surface, _draw_connection[index], _draw_connection[index + 1], 0.0028, Color(draw_tint, draw_opacity * 0.62))
 	for index in range(_trail_samples.size() - 1):
 		var first: Dictionary = _trail_samples[index]
 		var second: Dictionary = _trail_samples[index + 1]
 		var opacity := clampf(1.0 - float(first.age) / 0.060, 0.0, 1.0)
 		var tint := Color(1.0, 0.77, 0.38, opacity * 0.18) if _mode == "parry" else Color(0.66, 0.96, 1.0, opacity * 0.16)
-		_append_streak(surface, first.point, second.point, 0.0032 if _mode == "slash" else 0.0018, tint)
+		if _weapon_skin != "factory" and _mode != "parry":
+			tint = Color(_active_blade_tint(),opacity*0.30)
+		var width := 0.0032 if _mode == "slash" else 0.0018
+		if _weapon_family == "heavy":
+			width *= 2.2
+		_append_streak(surface, first.point, second.point, width, tint)
 	_trail.mesh = surface.commit()
 
 func _make_grip(parent: Node3D, direction: float, steel: StandardMaterial3D, dark: StandardMaterial3D, glow: StandardMaterial3D, wrap: StandardMaterial3D, ivory: StandardMaterial3D, copper: StandardMaterial3D) -> void:
@@ -1193,7 +1951,7 @@ func _add_brushed_finish(material: StandardMaterial3D) -> void:
 	material.uv1_scale = Vector3(36.0, 0.7, 36.0)
 
 
-func _blade_mesh() -> ArrayMesh:
+func _blade_mesh(profile: Array[Vector3] = []) -> ArrayMesh:
 	# A broad forged face, a narrow sharpened bevel and a dark spine have
 	# different normals. Wrist torsion now moves highlights across real volume.
 	var face := SurfaceTool.new()
@@ -1209,6 +1967,7 @@ func _blade_mesh() -> ArrayMesh:
 		Vector3(-0.006, 0.018, 0.76),
 		Vector3(0.0, 0.0004, 0.86),
 	]
+	if not profile.is_empty(): sections = profile
 	for index in range(sections.size() - 1):
 		var first: Vector3 = sections[index]
 		var second: Vector3 = sections[index + 1]

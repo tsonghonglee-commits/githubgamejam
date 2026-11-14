@@ -4,6 +4,7 @@ extends Node
 const SAMPLE_RATE := 44100
 const VOICES := 24
 const BOSS_ENTRY_EVENTS := ["entry_ink", "entry_cyber", "entry_sea", "entry_empire"]
+const WEAPON_EVENTS := ["red_draw","red_dock","plasma_ignite","plasma_cross","heavy_charge","heavy_release","heavy_wave"]
 const EVENT_NAMES := ["slash", "unsheathe", "blade_whoosh", "sheathe", "guard_raise", "guard_release", "hit", "kill", "parry", "perfect", "hurt", "gear", "start", "win", "lose", "windup", "enemy_swing", "ranged_charge", "ranged_fire", "boss_charge", "parry_clash", "explosion", "explosion_reflected", "flyby", "carrier_engine", "boss_release", "heavy_land", "boss_ink_break", "boss_cyber_arc", "boss_sea_rupture", "boss_ship_collapse"]
 
 var _sounds: Dictionary = {}
@@ -31,7 +32,7 @@ var _runner_cue_duck := 0.0
 
 
 func _ready() -> void:
-	for event_name in EVENT_NAMES+BOSS_ENTRY_EVENTS:
+	for event_name in EVENT_NAMES+BOSS_ENTRY_EVENTS+WEAPON_EVENTS:
 		_sounds[event_name] = _synthesize(event_name)
 	for index in range(VOICES):
 		var player := AudioStreamPlayer.new()
@@ -86,6 +87,7 @@ func play_event(kind: String, intensity: float = 1.0) -> void:
 		"slash": minimum_gap = 74 if intensity <= 0.55 else 35
 		"blade_whoosh": minimum_gap = 82
 		"unsheathe", "sheathe", "guard_raise", "guard_release": minimum_gap = 48
+		"red_draw", "red_dock", "plasma_ignite", "plasma_cross", "heavy_charge", "heavy_release", "heavy_wave": minimum_gap = 65
 		"hit": minimum_gap = 38
 		"kill": minimum_gap = 24
 		"gear": minimum_gap = 70
@@ -113,6 +115,7 @@ func play_event(kind: String, intensity: float = 1.0) -> void:
 		"parry", "perfect", "parry_clash": pool = Vector2i(7, 3)
 		"windup", "enemy_swing", "ranged_charge", "ranged_fire", "boss_charge": pool = Vector2i(10, 2)
 		"unsheathe", "sheathe", "guard_raise", "guard_release": pool = Vector2i(12, 3)
+		"red_draw", "red_dock", "plasma_ignite", "plasma_cross", "heavy_charge", "heavy_release", "heavy_wave": pool = Vector2i(12, 3)
 		"slash", "blade_whoosh": pool = Vector2i(15, 5)
 		"flyby", "carrier_engine", "boss_release": pool = Vector2i(20, 2)
 		"heavy_land": pool = Vector2i(4, 3)
@@ -333,6 +336,9 @@ func _synthesize_runner_step(side: float) -> AudioStreamWAV:
 func _synthesize(kind: String) -> AudioStreamWAV:
 	var duration := 0.16
 	match kind:
+		"red_draw", "red_dock": duration = 0.21
+		"plasma_ignite", "plasma_cross": duration = 0.30
+		"heavy_charge", "heavy_release", "heavy_wave": duration = 0.37
 		"slash", "blade_whoosh": duration = 0.19
 		"unsheathe": duration = 0.19
 		"sheathe": duration = 0.17
@@ -390,6 +396,27 @@ func _synthesize(kind: String) -> AudioStreamWAV:
 			envelope = minf(t / 0.0008, 1.0) * smoothstep(0.0, 0.026, duration - t)
 		var sample := 0.0
 		match kind:
+			"red_draw", "red_dock":
+				var latch_time := 0.006 if kind == "red_draw" else 0.045
+				var latch := exp(-absf(t-latch_time)*150.0)
+				var slide := exp(-pow((t-0.033)/0.028,2.0))
+				var frequency := 390.0 if kind == "red_dock" else 565.0
+				var ring := sin(TAU*frequency*t)*exp(-t*27.0)
+				sample = grit*latch*0.9+air_noise*slide*0.95+ring*0.58
+			"plasma_ignite", "plasma_cross":
+				var pitch := 96.0 if kind == "plasma_ignite" else 138.0
+				var ramp := 470.0
+				var hum := sin(TAU*(pitch*t+ramp*t*t))
+				var octave := sin(TAU*(pitch*2.0*t+ramp*1.7*t*t))
+				var surge := smoothstep(0.0,0.038,t)*exp(-t*6.5)
+				sample = (hum*0.65+octave*0.28+air_noise*0.78)*surge
+			"heavy_charge", "heavy_release", "heavy_wave":
+				var drive := sin(TAU*(46.0*t+140.0*t*t))*exp(-t*7.0)
+				var clank := sin(TAU*241.0*t)*exp(-t*25.0)
+				var attack := exp(-pow((t-0.033)/0.033,2.0))
+				sample = drive*0.8+clank*0.3+low_noise*attack*1.2
+				if kind == "heavy_release": sample += grit*attack*0.65
+				if kind == "heavy_wave": sample = sample*0.45+air_noise*exp(-t*6.5)*1.5+sin(TAU*(630.0*t-455.0*t*t))*exp(-t*8.0)*0.48
 			"entry_ink":
 				var resonance := sin(TAU*(89.0*t+31.0*t*t))*0.64+sin(TAU*(178.0*t+62.0*t*t))*0.25
 				var steel := sin(TAU*1643.0*t)*exp(-absf(t-0.42)*11.0)

@@ -3,6 +3,7 @@ extends Control
 ## Every finger keeps its original role until release, even outside its button.
 
 const REFERENCE_SIZE := Vector2(1280, 720)
+const Locale = preload("res://scripts/game_locale.gd")
 const CYAN := Color(0.32, 0.96, 0.86)
 const AMBER := Color(1.0, 0.61, 0.27)
 
@@ -78,7 +79,10 @@ func handle_event(event: InputEvent) -> bool:
 		var action: String = str(touches.get(event.index, "ignored"))
 		if game.state != "playing":
 			return true
-		if action == "blade" and game.slashing and game.left_down:
+		var family: String = game.weapon_combat.family
+		if family == "heavy" and action == "blade" and game.weapon_combat.steer(event.relative):
+			return true
+		if (action == "blade" or (family == "dual" and action == "attack")) and game.slashing and game.left_down:
 			game.mobile_drag_blade(event.relative)
 		elif action == "look" and not game.slashing:
 			game.mobile_look_drag(event.relative)
@@ -99,26 +103,46 @@ func _press(index: int, point: Vector2) -> void:
 			game.start_game()
 		return
 	var action := get_action_at(point)
-	if action in ["blade", "look", "parry"] and touches.values().has(action):
+	var family: String = game.weapon_combat.family
+	var katana := family in ["factory", "long"]
+	if (action in ["blade", "look", "parry"] or (not katana and action == "attack")) and touches.values().has(action):
 		action = "ignored"
+	if family == "heavy" and action == "attack": action = "ignored"
 	touches[index] = action
 	match action:
 		"boost": game.shift_down = true
-		"attack": game._short_slash()
-		"parry": game._begin_guard()
-		"blade": game.mobile_begin_blade()
+		"attack":
+			if katana: game._short_slash()
+			else: game.weapon_combat.button(-1,true)
+		"parry":
+			if katana: game._begin_guard()
+			else: game.weapon_combat.touch_guard(true)
+		"blade":
+			if katana: game.mobile_begin_blade()
+			else: game.weapon_combat.button(-1 if family == "heavy" else 1,true)
 		"pause": game._pause_game()
 
 
 func _release(index: int, allow_tap: bool = true) -> void:
 	var action: String = str(touches.get(index, "ignored"))
 	touches.erase(index)
-	if action == "boost":
-		game.shift_down = touches.values().has("boost")
-	elif action == "blade":
-		game.mobile_end_blade()
-	elif action == "parry":
-		game._release_guard(allow_tap)
+	var family: String = game.weapon_combat.family
+	var katana := family in ["factory", "long"]
+	match action:
+		"boost": game.shift_down = touches.values().has("boost")
+		"attack":
+			if not katana: _release_weapon_button(-1,allow_tap)
+		"blade":
+			if katana: game.mobile_end_blade()
+			else: _release_weapon_button(-1 if family == "heavy" else 1,allow_tap)
+		"parry":
+			if katana: game._release_guard(allow_tap)
+			else: game.weapon_combat.touch_guard(false,allow_tap)
+
+
+func _release_weapon_button(side: int, allow_tap: bool) -> void:
+	if allow_tap: game.weapon_combat.button(side,false)
+	else: game.weapon_combat.cancel_button(side)
 
 
 func release_all() -> void:
@@ -131,22 +155,42 @@ func _draw() -> void:
 	if not enabled or _font == null or game.state != "playing":
 		return
 	draw_set_transform(Vector2.ZERO, 0.0, size / REFERENCE_SIZE)
+	var family: String = game.weapon_combat.family
 	var labels := {"boost": "提速", "attack": "普攻", "parry": "振刀", "blade": "按住斩击", "pause": "暂停"}
-	for action in ["boost", "parry", "attack", "blade", "pause"]:
+	var actions := ["boost", "parry", "attack", "blade", "pause"]
+	var blade_hint := "拖动操刀"
+	var hint := "右侧空白拖动转头 · 按住斩击后拖动操刀"
+	if family in ["dual", "heavy"]: labels.parry = "格挡"
+	match family:
+		"dual":
+			labels.attack = "左剑"
+			labels.blade = "右剑"
+			blade_hint = "长按可拖切"
+			hint = "双剑同时按下可交叉格挡"
+		"heavy":
+			labels.blade = "蓄力"
+			actions.erase("attack")
+			blade_hint = "拖动预览刀线"
+			hint = "拖动预览刀线 · 满蓄释放剑气"
+	for action in actions:
 		var rectangle := _reference_button_rect(action)
 		var pressed := touches.values().has(action)
 		var accent: Color = AMBER if action == "parry" else CYAN
 		draw_style_box(_button_style(accent, pressed), rectangle)
-		var label: String = labels[action]
+		var label: String = Locale.text(labels[action])
 		var font_size: int = 23 if action != "pause" else 19
 		var label_width := _font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
+		if label_width > rectangle.size.x - 18.0:
+			font_size = maxi(11, floori(font_size * (rectangle.size.x - 18.0) / label_width))
+			label_width = _font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
 		draw_string(_font, rectangle.get_center() + Vector2(-label_width * 0.5, 8), label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color(0.94, 1, 1))
-		if action == "blade" or action == "boost":
-			var hint := "拖动操刀" if action == "blade" else "持续按住"
-			var hint_width := _font.get_string_size(hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
-			draw_string(_font, rectangle.get_center() + Vector2(-hint_width * 0.5, 32), hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(accent, 0.85))
-	var hint := "右侧空白拖动转头 · 按住斩击后拖动操刀"
-	draw_string(_font, Vector2(500, _safe_reference_rect().end.y - 20), hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(CYAN, 0.7))
+		var button_hint := blade_hint if action == "blade" else ("持续按住" if action == "boost" else "")
+		if not button_hint.is_empty():
+			var localized_hint := Locale.text(button_hint)
+			var hint_width := minf(rectangle.size.x - 16.0, _font.get_string_size(localized_hint, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x)
+			draw_string(_font, rectangle.get_center() + Vector2(-hint_width * 0.5, 32), localized_hint, HORIZONTAL_ALIGNMENT_LEFT, hint_width, 13, Color(accent, 0.85))
+	var safe := _safe_reference_rect()
+	draw_string(_font, Vector2(500, safe.end.y - 20), Locale.text(hint), HORIZONTAL_ALIGNMENT_LEFT, safe.end.x - 685.0, 14, Color(CYAN, 0.7))
 	draw_set_transform(Vector2.ZERO)
 
 

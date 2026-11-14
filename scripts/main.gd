@@ -17,6 +17,11 @@ const CampaignRuntimeScript = preload("res://scripts/campaign_runtime.gd")
 const SeriesCombatScript = preload("res://scripts/series_combat.gd")
 const SeriesSceneryScript = preload("res://scripts/series_scenery.gd")
 const SeriesEffectsScript = preload("res://scripts/series_effects.gd")
+const WeaponShopScript = preload("res://scripts/weapon_shop.gd")
+const WeaponCombatScript = preload("res://scripts/weapon_combat.gd")
+const BeginnerTutorialScript = preload("res://scripts/beginner_tutorial.gd")
+const TitleAttractScript = preload("res://scripts/title_attract.gd")
+const Locale = preload("res://scripts/game_locale.gd")
 const ENEMY_SERIES := "SERIES_01"
 const ENEMY_SERIES_LABEL := "第一系列"
 const BOSS_CARRIER_KIND := "boss_carrier"
@@ -33,6 +38,11 @@ const DEPLOYMENT_SECONDS := DEPLOYMENT_RELEASE_SECONDS + DEPLOYMENT_FALL_SECONDS
 const MAX_PROJECTILES := 24
 const MAX_PROJECTILE_EVENTS := MAX_PROJECTILES*2
 const MAX_BLASTS := 12
+const HEAVY_WAVE_LIMIT := 3
+const HEAVY_WAVE_SPEED := 62.0
+const HEAVY_WAVE_RANGE := 46.0
+const HEAVY_WAVE_HALF_SPAN := 1.42
+const HEAVY_WAVE_HALF_HEIGHT := 0.115
 const ENEMY_RUN_SPEED := 2.8
 const PLAYER_CUT_MIN_Z := -32.0
 const PLAYER_CUT_MAX_Z := -0.5
@@ -50,6 +60,9 @@ const GUARD_RECOVERY_SECONDS := 0.15
 const SHEATH_ALERT_LEAD := 0.60
 const SHEATH_ALERT_PEAK_LEAD := 0.40
 const SHEATH_BREATH_SECONDS := 1.35
+const GUARD_COUNTDOWN_HORIZON := 2.5
+const CUT_POPUP_LIFE := 0.55
+const CUT_POPUP_SLOTS := 6
 const PROJECTILE_SPEED_SCALE: float = 2.0 / 3.0
 const PROJECTILE_TARGET := Vector3(0, 1.65, -0.9)
 const PROJECTILE_EVENT_TIE_EPSILON: float = 0.000001
@@ -128,6 +141,9 @@ var boss_support_window := 0
 var boss_support_side := -1
 var projectiles: Array = []
 var blasts: Array = []
+var _heavy_waves: Array[Dictionary] = []
+var _heavy_wave_mesh: ArrayMesh
+var _heavy_wave_material: StandardMaterial3D
 var road_segments: Array[Node3D] = []
 var wave_index: int = 0
 var spawn_timer: float = 2.8
@@ -151,10 +167,16 @@ var real_clock: float = 0.0
 var test_mode: bool = false
 var victory_timer: float = -1.0
 var cut_serial: int = 0
+var cut_total := 0
+var reflected_kills := 0
+var _cut_feedback_kind := ""
+var _cut_feedback_force := 0.0
+var _last_light_hit_at := -INF
+var _cut_popups: Array[Dictionary] = []
+var _next_cut_popup_slot := 0
 var last_path: PackedVector2Array = PackedVector2Array()
 var last_cut_path: PackedVector2Array = PackedVector2Array()
 var press_drag: Vector2 = Vector2.ZERO
-var show_timing: bool = false
 var combat_events: Array[Dictionary] = []
 var combat_stats: Dictionary = {}
 var impact_effects: Array = []
@@ -188,9 +210,20 @@ var forge_unit_box: BoxMesh
 var forge_emitters: Array[Dictionary] = []
 var forge_lights: Array[SpotLight3D] = []
 var menu_showcase: Node3D
+var title_attract: Node3D
+var tutorial = BeginnerTutorialScript.new()
+var weapon_combat = WeaponCombatScript.new()
+var weapon_trial_id := ""
+var _trial_finish: Dictionary = {}
+var _trial_shot_timer := 0.0
+var _trial_targets: Array[Node3D] = []
+var weapon_shop = WeaponShopScript.new()
+var weapon_shop_path := WeaponShopScript.SAVE_PATH
+var shop_message := ""
+var _run_currency := 0
+var _reward_currency := true
 var menu_prepared := true
-var start_when_menu_prepared := false
-var ui_settings := {"volume":1.0,"fullscreen":true,"vsync":true,"msaa":true}
+var ui_settings := {"volume":1.0,"fullscreen":true,"vsync":true,"msaa":true,"cut_popups":true,"language":Locale.DEFAULT}
 var ui_settings_path := UI_PREFERENCES_FILE
 var ui_quit_requested := false
 var ui_quit_count := 0
@@ -226,23 +259,41 @@ func _ready() -> void:
 	_build_interface()
 	sword.visible = false
 	_load_ui_settings()
-	ProjectileScript.prewarm()
-	EnemyScript.prewarm_normal_model()
-	EnemyScript.prewarm_models(["tank", "ranged", "boss", "drone", "missile_drone", "barrier", "beam", "shield_drone", "interceptor", "mine_layer", BOSS_CARRIER_KIND])
-	_build_menu_showcase()
-	campaign.prepare_new_run(false)
+	weapon_shop.load_profile(weapon_shop_path if _ui_preferences_enabled or weapon_shop_path != WeaponShopScript.SAVE_PATH else "")
+	weapon_combat.configure(self,weapon_shop.current_weapon())
+	if DisplayServer.get_name() != "headless":
+		title_attract = TitleAttractScript.new()
+		camera.add_child(title_attract)
+		title_attract.configure()
+		title_attract.set_active(true)
+	menu_prepared = false
+	call_deferred("_prepare_title")
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	print("Slay the highway / 杀路 v%s four-stage campaign ready | Godot " % ProjectSettings.get_setting("application/config/version"), Engine.get_version_info().string)
+
+
+func _prepare_title() -> void:
+	if DisplayServer.get_name() != "headless":
+		await RenderingServer.frame_post_draw
+	ProjectileScript.prewarm()
+	EnemyScript.prewarm_normal_model()
+	for kind in ["tank", "ranged", "boss", "drone", "missile_drone", "barrier", "beam", "shield_drone", "interceptor", "mine_layer", BOSS_CARRIER_KIND]:
+		EnemyScript.prewarm_models([kind])
+		if DisplayServer.get_name() != "headless":
+			await get_tree().process_frame
+	if is_instance_valid(title_attract):
+		await title_attract.prepare_roster()
+	await _build_menu_showcase()
+	menu_prepared = true
+	campaign.prepare_new_run(false)
 	if "--preview" in OS.get_cmdline_user_args():
 		start_game()
-		_spawn_enemy("normal", 1, -10.0)
-		_spawn_enemy("tank", 2, -19.0)
-		_spawn_enemy("ranged", 0, -32.0)
 
 
 func _exit_tree() -> void:
 	if _ui_settings_dirty:
 		_save_ui_settings()
+	_flush_weapon_currency()
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
 
@@ -279,6 +330,8 @@ func _input(event: InputEvent) -> void:
 		if hud.handle_menu_input(event):
 			get_viewport().set_input_as_handled()
 			return
+		if state == "menu" and not test_mode:
+			return
 	if is_instance_valid(touch_controls) and touch_controls.handle_event(event):
 		get_viewport().set_input_as_handled()
 		return
@@ -292,7 +345,11 @@ func _input(event: InputEvent) -> void:
 			return
 		match event.keycode:
 			KEY_ENTER, KEY_KP_ENTER:
-				if training:
+				if not weapon_trial_id.is_empty():
+					_return_to_menu()
+				elif _tutorial_active():
+					if bool(tutorial.snapshot().completed): _return_to_menu()
+				elif training:
 					training = false
 					practice = false
 					start_game()
@@ -309,12 +366,16 @@ func _input(event: InputEvent) -> void:
 				if state == "dead" or state == "won":
 					start_game()
 			KEY_F2:
+				if _tutorial_active() or not weapon_trial_id.is_empty(): return
+				if state == "playing": _reward_currency = false
 				practice = not practice
 				if state != "playing":
 					start_game()
 				_notice("练习模式：生命保留至少一格" if practice else "标准模式：五格生命", 3.0)
 			KEY_F3:
+				if _tutorial_active() or not weapon_trial_id.is_empty(): return
 				if state == "playing":
+					_reward_currency = false
 					if campaign != null and campaign.active:
 						campaign.begin_boss()
 						return
@@ -326,16 +387,18 @@ func _input(event: InputEvent) -> void:
 					elapsed = route_duration
 					_spawn_boss()
 			KEY_F4:
+				if _tutorial_active() or not weapon_trial_id.is_empty(): return
 				_start_cutting_lab()
-			KEY_F5:
-				show_timing = not show_timing
 			KEY_F6:
+				if _tutorial_active() or not weapon_trial_id.is_empty(): return
 				if state == "playing" and not touch_mode:
+					_reward_currency = false
 					invincible = not invincible
 					_notice("无敌已开启" if invincible else "无敌已关闭")
 					get_viewport().set_input_as_handled()
 	if event is InputEventMouseMotion and state == "playing":
 		var movement: Vector2 = event.relative
+		if weapon_combat.steer(movement): return
 		if left_down and not slashing and not slash_lock:
 			press_drag += movement
 			if press_drag.length() < 4.0:
@@ -357,6 +420,9 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		if state != "playing":
 			return
+		if weapon_combat.family in ["dual","heavy"] and event.button_index in [MOUSE_BUTTON_LEFT,MOUSE_BUTTON_RIGHT]:
+			weapon_combat.button(-1 if event.button_index == MOUSE_BUTTON_LEFT else 1,event.pressed)
+			return
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
 				if left_down:
@@ -366,14 +432,7 @@ func _input(event: InputEvent) -> void:
 				press_drag = Vector2.ZERO
 				_short_slash()
 			else:
-				if slashing:
-					_consume_strokes()
-					sword_time = 0.0
-					sword.set_pose("sheathed")
-				left_down = false
-				slashing = false
-				slash_lock = false
-				pending_strokes.clear()
+				_release_blade_input()
 		if event.button_index == MOUSE_BUTTON_RIGHT:
 			if event.pressed and not _right_guard_down:
 				_right_guard_down = true
@@ -381,6 +440,19 @@ func _input(event: InputEvent) -> void:
 			elif not event.pressed:
 				_right_guard_down = false
 				_release_guard()
+
+
+func _release_blade_input() -> void:
+	if _tutorial_active() and left_down and not slashing and not slash_lock:
+		tutorial.observe_light_release(left_time)
+	if slashing:
+		_consume_strokes()
+		sword_time = 0.0
+		sword.set_pose("sheathed")
+	left_down = false
+	slashing = false
+	slash_lock = false
+	pending_strokes.clear()
 
 
 func mobile_begin_blade() -> void:
@@ -418,8 +490,7 @@ func mobile_look_drag(movement: Vector2) -> void:
 
 
 func start_game() -> void:
-	if campaign != null and not training and not campaign.ensure_ready_for_start():
-		start_when_menu_prepared = true
+	if campaign != null and not training and not _tutorial_active() and not campaign.ensure_ready_for_start():
 		state = "menu"
 		_reset_input()
 		sword.visible = false
@@ -427,12 +498,13 @@ func start_game() -> void:
 			if is_instance_valid(enemy): enemy.set_meta("simulation_scale",0.0)
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		return
+	_flush_weapon_currency()
 	_restore_deployment_clearance()
 	boss_carrier = null
 	landing_impact_age = 10.0
 	landing_impact_strength = 0.0
 	_clear_retiring_enemies()
-	start_when_menu_prepared = false
+	if is_instance_valid(title_attract): title_attract.set_active(false)
 	if is_instance_valid(menu_showcase):
 		menu_showcase.visible = false
 		menu_showcase.queue_free()
@@ -445,9 +517,18 @@ func start_game() -> void:
 	enemies.clear()
 	_clear_projectiles()
 	_clear_blasts()
+	_clear_heavy_waves()
 	state = "playing"
 	sword.visible = true
+	var finish: Dictionary = weapon_shop.current_weapon()
+	if not weapon_trial_id.is_empty():
+		finish = _trial_finish
+	elif _tutorial_active():
+		finish = weapon_shop.preview_weapon("factory")
+	weapon_combat.configure(self,finish)
 	_clear_sheath_alert()
+	_run_currency = 0
+	_reward_currency = not (practice or training or _tutorial_active())
 	combat_events.clear()
 	_volley_damage.clear()
 	combat_stats = {"parries": 0, "perfects": 0, "hits_taken": 0, "projectiles_cut": 0, "windups": 0, "impacts": 0, "kills": 0, "slash_time": 0.0}
@@ -457,6 +538,13 @@ func start_game() -> void:
 	invincible = false
 	score = 0
 	kills = 0
+	cut_total = 0
+	reflected_kills = 0
+	_cut_feedback_kind = ""
+	_cut_feedback_force = 0.0
+	_last_light_hit_at = -INF
+	_cut_popups.clear()
+	_next_cut_popup_slot = 0
 	combo = 0
 	elapsed = 0.0
 	game_clock = 0.0
@@ -522,7 +610,7 @@ func start_game() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if touch_mode else Input.MOUSE_MODE_CAPTURED
 	audio.play_event("start")
 	_notice("斩断发光核心或颈腰连接 · 任意一道漏敌都会受伤", 6.0)
-	if campaign != null and not training: campaign.begin_run()
+	if campaign != null and not training and not _tutorial_active() and weapon_trial_id.is_empty(): campaign.begin_run()
 	_record_combat("start")
 
 
@@ -530,9 +618,7 @@ func _build_menu_showcase() -> void:
 	if DisplayServer.get_name() == "headless" or OS.has_feature("android") or OS.has_feature("ios"):
 		return
 	menu_prepared = false
-	# The menu portrait renders the same meshes and shaders used in combat.
-	# The dark stage also covers the other asset variants while the renderer
-	# uploads / compiles them, before the first timed enemy appears.
+	# Render combat materials on the preparation stage behind the title film.
 	menu_showcase = Node3D.new()
 	menu_showcase.name = "MenuShowcase"
 	add_child(menu_showcase)
@@ -562,14 +648,6 @@ func _build_menu_showcase() -> void:
 			actor.set_meta("simulation_scale",0.0)
 			actor.set_meta("flythrough_enabled",false)
 			actor.set_action("recover",1.0)
-	var portrait = EnemyScript.new()
-	menu_showcase.add_child(portrait)
-	portrait.configure("normal",1)
-	portrait.name = "MenuPortrait"
-	portrait.position = Vector3(3.42,-0.16,-5.7)
-	portrait.scale = Vector3.ONE*1.6
-	portrait.set_meta("simulation_scale",0.0)
-	portrait.set_action("recover",1.0)
 	# Warm the actual cut-particle variant from a real, noncritical material
 	# cut on a hidden portrait copy. No gameplay actor or score is involved.
 	var cut_point: Vector3 = models[0].to_global(models[0]._part_pose(1)*Vector3(-0.70,1.475,0.20))
@@ -591,22 +669,10 @@ func _build_menu_showcase() -> void:
 	burst.position = Vector3(0,1.5,-15)
 	burst.configure(0.65,0.0)
 	burst.advance(0.06)
-	_finish_menu_preparation()
-
-
-func _finish_menu_preparation() -> void:
 	await RenderingServer.frame_post_draw
-	# Keep the highway and one portrait on the actual title screen. The other
-	# already-rendered variants and their cover only prepare combat resources.
 	if is_instance_valid(menu_showcase):
-		for child in menu_showcase.get_children():
-			if child.has_method("set_entry_visibility"):
-				child.set_entry_visibility(1.0)
-				child.set_meta("entry_active",false)
-			if child is Node3D and child.name != "MenuPortrait": child.visible = false
-	menu_prepared = true
-	if start_when_menu_prepared and state == "menu" and (campaign == null or campaign.assets_ready):
-		_start_game_from_ui()
+		menu_showcase.queue_free()
+		menu_showcase = null
 
 
 func _start_cutting_lab() -> void:
@@ -623,6 +689,52 @@ func _start_cutting_lab() -> void:
 	_spawn_enemy("tank", 2, -12.0)
 	_spawn_enemy("boss", 0, -22.0)
 	_notice("切割实验场 · 静止目标 / 持续切碎残骸 · F4 重置 · Enter 返回挑战", 999.0)
+
+
+func _start_weapon_trial(id: String) -> void:
+	var finish: Dictionary = weapon_shop.preview_weapon(id)
+	if finish.is_empty(): return
+	weapon_trial_id = id
+	_trial_finish = finish
+	if campaign != null: campaign.suspend()
+	if series_scenery != null: series_scenery.force_series(1)
+	training = true
+	practice = true
+	start_game()
+	_trial_targets.clear()
+	_spawn_trial_target(0)
+	_spawn_trial_target(1)
+	_trial_shot_timer = 2.0
+	_notice("打开暂停菜单可返回商店" if touch_mode else "Enter 或暂停菜单返回商店",6.0)
+	_ui_pointer_capture_until_release = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+
+
+func _spawn_trial_target(slot: int) -> void:
+	var target := _spawn_enemy("normal" if slot == 0 else "tank",2 if slot == 0 else 3,-10.0 if slot == 0 else -15.0)
+	if slot == 0:
+		target.position.x = 0.0
+		target.set_meta("lane_x",0.0)
+	if slot == _trial_targets.size():
+		_trial_targets.append(target)
+	else:
+		_trial_targets[slot] = target
+
+
+func _update_weapon_trial(world_delta: float) -> void:
+	for slot in range(_trial_targets.size()):
+		var target := _trial_targets[slot]
+		if not is_instance_valid(target):
+			_spawn_trial_target(slot)
+		elif target.dead and float(target.get_meta("dead_time",0.0)) >= 0.85:
+			enemies.erase(target)
+			target.queue_free()
+			_spawn_trial_target(slot)
+		elif target.dead:
+			target.set_meta("dead_time",float(target.get_meta("dead_time",0.0))+world_delta)
+	_trial_shot_timer -= world_delta
+	if _trial_shot_timer <= 0.0:
+		_spawn_projectile(Vector3(-1.4,1.78,-21.0),"bolt")
+		_trial_shot_timer = 2.8
 
 
 func _pause_game() -> void:
@@ -653,11 +765,23 @@ func _reset_input() -> void:
 	guard_age = 0.0
 	guard_cooldown = 0.0
 	pending_strokes.clear()
+	weapon_combat.reset()
 	sword.set_pose("sheathed")
 	_clear_sheath_alert()
 
 
 func _start_game_from_ui(reset_mode: bool = true) -> void:
+	if not weapon_trial_id.is_empty():
+		_start_weapon_trial(weapon_trial_id)
+		_update_hud()
+		return
+	if _tutorial_active():
+		if not reset_mode:
+			tutorial.begin(self)
+			_ui_pointer_capture_until_release = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+			_update_hud()
+			return
+		tutorial.stop()
 	if reset_mode:
 		practice = false
 		training = false
@@ -671,6 +795,12 @@ func _start_game_from_ui(reset_mode: bool = true) -> void:
 
 
 func _return_to_menu() -> void:
+	var trial_id := weapon_trial_id
+	weapon_trial_id = ""
+	_trial_finish.clear()
+	_trial_targets.clear()
+	_flush_weapon_currency()
+	if _tutorial_active(): tutorial.stop()
 	if campaign != null: campaign.suspend()
 	if series_scenery != null: series_scenery.force_series(1)
 	_restore_deployment_clearance()
@@ -679,26 +809,28 @@ func _return_to_menu() -> void:
 	if slashing:
 		_consume_strokes()
 	_reset_input()
+	weapon_combat.configure(self,weapon_shop.current_weapon())
 	for enemy in enemies:
 		if is_instance_valid(enemy): enemy.queue_free()
 	enemies.clear()
 	_clear_projectiles()
 	_clear_blasts()
+	_clear_heavy_waves()
 	for effect in impact_effects:
 		if is_instance_valid(effect.node): effect.node.queue_free()
 	impact_effects.clear()
 	state = "menu"
+	if is_instance_valid(title_attract): title_attract.set_active(true)
 	sword.visible = false
 	practice = false
 	training = false
-	show_timing = false
+	_cut_popups.clear()
 	invincible = false
 	boss_spawned = false
 	boss_enemy = null
 	boss_timer = 2.5
 	boss_pattern = 0
 	victory_timer = -1.0
-	start_when_menu_prepared = false
 	ui_quit_requested = false
 	speed = BASE_SPEED
 	gear = 1
@@ -726,12 +858,13 @@ func _return_to_menu() -> void:
 		menu_showcase.queue_free()
 		menu_showcase = null
 	menu_prepared = true
-	_build_menu_showcase()
-	if campaign != null: campaign.prepare_new_run(false)
+	if campaign != null and (trial_id.is_empty() or not campaign.assets_ready or campaign.consumed):
+		campaign.prepare_new_run(false)
 	audio.set_runner_motion(0.0,0.0,false,0.0)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_ui_pointer_capture_until_release = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
 	_update_hud()
+	if not trial_id.is_empty(): hud.open_weapon_store(trial_id)
 
 
 func _on_ui_feedback(_kind: StringName) -> void:
@@ -741,15 +874,34 @@ func _on_ui_feedback(_kind: StringName) -> void:
 
 func _on_ui_action(action: StringName, value: Variant) -> void:
 	match action:
+		&"title_enter":
+			if state == "menu" and is_instance_valid(title_attract):
+				title_attract.begin_intro()
 		&"start":
 			if state not in ["menu","dead","won"]: return
-			if state == "menu" and (not menu_prepared or (campaign != null and not campaign.assets_ready)):
-				start_when_menu_prepared = true
-				_ui_pointer_capture_until_release = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
-			else:
-				_start_game_from_ui()
+			if state == "menu" and (not menu_prepared or not campaign.assets_ready): return
+			_start_game_from_ui()
 		&"restart":
 			if state in ["paused","dead","won"]: _start_game_from_ui(false)
+		&"tutorial":
+			if state != "menu" or not menu_prepared or not campaign.assets_ready: return
+			tutorial.begin(self)
+			_ui_pointer_capture_until_release = Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+		&"shop_weapon", &"shop_skin":
+			if state != "menu" or not value is String: return
+			var error: Error = weapon_shop.buy_or_equip_skin(value) if action == &"shop_skin" else weapon_shop.buy_or_equip(value)
+			shop_message = ""
+			if error == OK:
+				weapon_combat.configure(self,weapon_shop.current_weapon())
+			elif error == ERR_UNAVAILABLE:
+				shop_message = "货币不足"
+			elif error == ERR_LOCKED:
+				shop_message = "请先解锁对应武器"
+			else:
+				shop_message = "无法保存装备"
+		&"shop_trial":
+			if state != "menu" or not value is String or not menu_prepared or not campaign.assets_ready: return
+			_start_weapon_trial(value)
 		&"resume":
 			if state == "paused":
 				_resume_game()
@@ -770,6 +922,17 @@ func _on_ui_action(action: StringName, value: Variant) -> void:
 			if state == "playing" or not value is bool: return
 			ui_settings[String(action)] = bool(value)
 			_ui_setting_changed()
+		&"cut_popups":
+			if state == "playing" or not value is bool: return
+			ui_settings.cut_popups = value
+			_ui_settings_dirty = true
+			_ui_settings_save_delay = 0.35
+		&"language":
+			if state == "playing" or not value is String or value not in Locale.LANGUAGES: return
+			ui_settings.language = value
+			Locale.set_language(value)
+			_ui_settings_dirty = true
+			_ui_settings_save_delay = 0.35
 	_update_hud()
 
 
@@ -784,9 +947,12 @@ func _load_ui_settings() -> void:
 		if config.load(ui_settings_path) == OK:
 			var volume: Variant = config.get_value("ui","volume",1.0)
 			if volume is float or volume is int: ui_settings.volume = clampf(float(volume),0.0,1.0)
-			for key in ["fullscreen","vsync","msaa"]:
+			for key in ["fullscreen","vsync","msaa","cut_popups"]:
 				var saved: Variant = config.get_value("ui",key,true)
 				if saved is bool: ui_settings[key] = saved
+			var language: Variant = config.get_value("ui","language",Locale.DEFAULT)
+			if language is String and language in Locale.LANGUAGES: ui_settings.language = language
+	Locale.set_language(str(ui_settings.language))
 	_apply_ui_settings()
 
 
@@ -823,6 +989,8 @@ func _save_ui_settings() -> void:
 
 
 func _process(delta: float) -> void:
+	if is_instance_valid(title_attract):
+		title_attract.set_active(state == "menu")
 	if _ui_settings_dirty:
 		_ui_settings_save_delay -= delta / maxf(Engine.time_scale,0.001)
 		if _ui_settings_save_delay <= 0.0:
@@ -837,7 +1005,9 @@ func _process(delta: float) -> void:
 	shake = move_toward(shake, 0.0, delta * 2.0)
 	sword_time = maxf(0.0, sword_time - delta)
 	message_timer = maxf(0.0, message_timer - delta)
+	var guard_prediction: Dictionary = {}
 	if state == "playing":
+		weapon_combat.update(delta)
 		if left_down:
 			left_time += delta
 			if left_time >= LONG_PRESS and not slashing and not slash_lock:
@@ -845,7 +1015,7 @@ func _process(delta: float) -> void:
 		var stopped: bool = hit_stop > 0.0
 		hit_stop = maxf(0.0, hit_stop - delta)
 		_update_speed(delta)
-		if training:
+		if training and weapon_trial_id.is_empty():
 			speed = 48.0
 			gear = 4
 		var world_scale: float = 0.0 if stopped else (SLOW_SCALE if slashing else 1.0)
@@ -862,6 +1032,7 @@ func _process(delta: float) -> void:
 			elapsed += sim_dt
 		_update_guard(delta, sim_dt)
 		_update_camera(delta)
+		weapon_combat.resolve_heavy_contact(delta)
 		_update_impact_effects(sim_dt, 0.0 if stopped else delta)
 		_update_blasts(sim_dt)
 		if series_effects != null: series_effects.update(sim_dt)
@@ -871,7 +1042,14 @@ func _process(delta: float) -> void:
 			if series_scenery != null: series_scenery.update(sim_dt,run_distance)
 		if slashing:
 			_consume_strokes()
-		if not training:
+		_update_heavy_waves(sim_dt)
+		if not weapon_trial_id.is_empty():
+			_update_projectiles(sim_dt)
+			_update_weapon_trial(sim_dt)
+		elif _tutorial_active():
+			_update_projectiles(sim_dt)
+			tutorial.update(delta,sim_dt)
+		elif not training:
 			_update_spawning(sim_dt)
 			_update_enemies(sim_dt, world_scale)
 			_update_projectiles(sim_dt)
@@ -899,7 +1077,8 @@ func _process(delta: float) -> void:
 		elif guard_cooldown <= 0.0 and sword_time <= 0.0 and (not left_down or slash_lock):
 			sword.set_pose("sheathed")
 		sword.set_voxel_fx_simulation(stopped or hit_stop > 0.0,world_scale)
-		_update_sheath_alert(delta,sim_dt)
+		guard_prediction = _guard_forecast()
+		_update_sheath_alert(delta,sim_dt,float(guard_prediction.get("nearest",-1.0)))
 	else:
 		_clear_sheath_alert()
 		sword.set_voxel_fx_simulation(true,0.0)
@@ -910,7 +1089,7 @@ func _process(delta: float) -> void:
 				enemy.set_meta("simulation_scale", 0.0)
 		for row in retiring_enemies:
 			if is_instance_valid(row.enemy): row.enemy.set_meta("simulation_scale",0.0)
-	_update_hud()
+	_update_hud(guard_prediction)
 
 
 func _update_speed(real_dt: float) -> void:
@@ -1023,7 +1202,7 @@ func _cut_projectile(index: int) -> void:
 func _enter_slash() -> bool:
 	if speed < MIN_SPEED + 0.8 and not training:
 		slash_lock = true
-		_notice("速度耗尽 · 松开左键恢复后再斩", 1.0)
+		_notice("速度耗尽 · 松开攻击键后再斩", 1.0)
 		return false
 	slash_view_rotation = camera.rotation
 	slash_view_position = camera.position
@@ -1069,11 +1248,121 @@ func _short_slash() -> void:
 	_cut_path(path, false)
 
 
+func _heavy_slash(direction: Vector2, charge: float) -> void:
+	var available := clampf((speed-MIN_SPEED)/10.0,0.0,1.0)
+	var swing_power := charge*available
+	var power := 0.92+float(gear)*lerpf(0.34,0.92,swing_power)
+	impact_direction = direction
+	slash_energy = lerpf(0.7,1.0,swing_power)
+	var cuts_before := cut_total
+	var path: PackedVector2Array = sword.get_light_slash_cut_path(get_viewport().get_visible_rect().size)
+	_cut_path(path,false,power)
+	var hit := cut_total > cuts_before
+	var cost := lerpf(1.0,8.0,swing_power)*(1.0 if hit else 0.55)
+	speed = maxf(MIN_SPEED,speed-cost)
+	gear = gear_for_speed(speed)
+	if hit:
+		shake = maxf(shake,lerpf(0.48,0.83,swing_power))
+		hit_stop = maxf(hit_stop,lerpf(0.023,0.052,swing_power))
+		_cut_feedback_force = maxf(_cut_feedback_force,swing_power)
+		if swing_power > 0.65: audio.play_event("heavy_land",0.7)
+	if charge >= 1.0:
+		_spawn_heavy_wave(path)
+	_record_combat("heavy_slash",null,{"charge":swing_power,"power":power,"cost":cost,"hit":hit})
+
+
+func _spawn_heavy_wave(path: PackedVector2Array) -> void:
+	if path.size() < 2:
+		return
+	var line := (path[-1]-path[0]).normalized()
+	if line.is_zero_approx():
+		return
+	if _heavy_waves.size() == HEAVY_WAVE_LIMIT:
+		_heavy_waves.pop_front().node.queue_free()
+	if _heavy_wave_mesh == null:
+		_build_heavy_wave_mesh()
+	var wave := MeshInstance3D.new()
+	wave.mesh = _heavy_wave_mesh
+	wave.material_override = _heavy_wave_material
+	wave.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(wave)
+	var blade_line := (camera.global_basis*Vector3(line.x,-line.y,0.0)).normalized()
+	var forward := camera.project_ray_normal(get_viewport().get_visible_rect().size*0.5)
+	var normal := blade_line.cross(forward).normalized()
+	blade_line = forward.cross(normal).normalized()
+	wave.global_transform = Transform3D(Basis(blade_line,normal,-forward),camera.global_position+forward*1.5)
+	_heavy_waves.append({"node":wave,"forward":forward,"stroke":line,"distance":0.0,"hits":{}})
+	audio.play_event("heavy_wave",1.0)
+	_record_combat("heavy_wave_launch",null,{"line":[line.x,line.y]})
+
+
+func _build_heavy_wave_mesh() -> void:
+	var surface := SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for layer in range(2):
+		var width := HEAVY_WAVE_HALF_HEIGHT if layer == 0 else 0.027
+		var tint := Color(1.0,0.34,0.055,0.53) if layer == 0 else Color(1.0,0.91,0.67,0.95)
+		for segment in range(12):
+			var a := float(segment)/6.0-1.0
+			var b := float(segment+1)/6.0-1.0
+			var x0 := a*HEAVY_WAVE_HALF_SPAN
+			var x1 := b*HEAVY_WAVE_HALF_SPAN
+			var y0 := width*sqrt(maxf(0.0,1.0-a*a))
+			var y1 := width*sqrt(maxf(0.0,1.0-b*b))
+			var bow0 := a*a*0.31-float(layer)*0.012
+			var bow1 := b*b*0.31-float(layer)*0.012
+			for vertex in [Vector3(x0,-y0,bow0),Vector3(x0,y0,bow0),Vector3(x1,y1,bow1),Vector3(x0,-y0,bow0),Vector3(x1,y1,bow1),Vector3(x1,-y1,bow1)]:
+				surface.set_color(tint)
+				surface.add_vertex(vertex)
+	_heavy_wave_mesh = surface.commit()
+	_heavy_wave_material = _material(Color.WHITE,true)
+	_heavy_wave_material.vertex_color_use_as_albedo = true
+	_heavy_wave_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_heavy_wave_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_heavy_wave_material.disable_fog = true
+
+
+func _update_heavy_waves(delta: float) -> void:
+	if delta <= 0.0:
+		return
+	for index in range(_heavy_waves.size()-1,-1,-1):
+		var wave := _heavy_waves[index]
+		var model: MeshInstance3D = wave.node
+		var travel := minf(HEAVY_WAVE_RANGE-float(wave.distance),HEAVY_WAVE_SPEED*delta)
+		var bounds := AABB(Vector3(-HEAVY_WAVE_HALF_SPAN,-HEAVY_WAVE_HALF_HEIGHT,-travel-0.10),Vector3(2.0*HEAVY_WAVE_HALF_SPAN,2.0*HEAVY_WAVE_HALF_HEIGHT,travel+0.45))
+		var transform := model.global_transform
+		for enemy in enemies.duplicate():
+			if not is_instance_valid(enemy) or enemy.dead or bool(enemy.get_meta("campaign_staging",false)): continue
+			var id: int = enemy.get_instance_id()
+			if wave.hits.has(id): continue
+			var result: Dictionary = enemy.cut_wave(transform,bounds,wave.stroke)
+			var removed := int(result.get("removed",0))
+			if bool(result.get("contact",false)): wave.hits[id] = true
+			if removed <= 0: continue
+			enemy.set_meta("last_cut",real_clock)
+			if enemy.dead: enemy.set_meta("dead_time",0.0)
+			cut_total += 1
+			_cut_feedback_kind = "light"
+			_cut_feedback_force = 0.84
+			_record_combat("heavy_wave_hit",enemy,{"removed":removed})
+		model.global_position += Vector3(wave.forward)*travel
+		wave.distance += travel
+		if float(wave.distance) >= HEAVY_WAVE_RANGE-0.0001:
+			model.queue_free()
+			_heavy_waves.remove_at(index)
+
+
+func _clear_heavy_waves() -> void:
+	for wave in _heavy_waves:
+		wave.node.queue_free()
+	_heavy_waves.clear()
+
+
 func _cut(from: Vector2, to: Vector2, continuous: bool) -> void:
 	_cut_path(PackedVector2Array([from, to]), continuous)
 
 
-func _cut_path(points: PackedVector2Array, continuous: bool) -> void:
+func _cut_path(points: PackedVector2Array, continuous: bool, attack_power: float = -1.0) -> void:
 	if points.size() < 2:
 		return
 	stroke_from = points[0]
@@ -1084,7 +1373,8 @@ func _cut_path(points: PackedVector2Array, continuous: bool) -> void:
 	last_cut_path = points
 	cut_serial += 1
 	stroke_alpha = 1.0
-	var power: float = 0.75 + float(gear) * 0.35
+	var power: float = attack_power if attack_power >= 0.0 else 0.75+float(gear)*0.35
+	var hit := false
 	for enemy in enemies.duplicate():
 		if not is_instance_valid(enemy):
 			continue
@@ -1101,7 +1391,11 @@ func _cut_path(points: PackedVector2Array, continuous: bool) -> void:
 			enemy.set_meta("held_cut_fx",previous_held_fx)
 		else:
 			enemy.remove_meta("held_cut_fx")
-		if int(result.get("removed", 0)) > 0:
+		var removed := int(result.get("removed",0))
+		if removed > 0:
+			hit = true
+			if continuous:
+				_add_cut_popup(removed)
 			enemy.set_meta("last_cut", real_clock)
 			if enemy.dead:
 				enemy.set_meta("dead_time", 0.0)
@@ -1115,6 +1409,31 @@ func _cut_path(points: PackedVector2Array, continuous: bool) -> void:
 			continue
 		if node.intersects_path(camera, points):
 			_cut_projectile(index)
+			hit = true
+	if hit:
+		cut_total += 1
+		_cut_feedback_kind = "held" if continuous else "light"
+		_cut_feedback_force = 0.65
+		if not continuous:
+			_cut_feedback_force = 1.0-smoothstep(0.07,0.48,real_clock-_last_light_hit_at)
+			_last_light_hit_at = real_clock
+
+
+func _add_cut_popup(cells: int) -> void:
+	if not bool(ui_settings.cut_popups): return
+	if _cut_popups.size() >= CUT_POPUP_SLOTS:
+		_cut_popups.pop_front()
+	_cut_popups.append({"slot":_next_cut_popup_slot,"cells":cells,"started":real_clock})
+	_next_cut_popup_slot = (_next_cut_popup_slot+1)%CUT_POPUP_SLOTS
+
+
+func _active_cut_popups() -> Array[Dictionary]:
+	while not _cut_popups.is_empty() and real_clock-float(_cut_popups[0].started) >= CUT_POPUP_LIFE:
+		_cut_popups.pop_front()
+	var active: Array[Dictionary] = []
+	for popup in _cut_popups:
+		active.append({"slot":popup.slot,"cells":popup.cells,"age":real_clock-float(popup.started)})
+	return active
 
 
 func _feedback_contact(point: Vector3, strength: float, kind: String = "hit") -> void:
@@ -1131,18 +1450,20 @@ func _clear_sheath_alert() -> void:
 		sword.set_sheath_alert(0.0)
 
 
-func _update_sheath_alert(real_delta: float, world_delta: float) -> void:
+func _update_sheath_alert(real_delta: float, world_delta: float, guard_contact: float = -1.0) -> void:
 	if state != "playing":
 		_clear_sheath_alert()
 		return
 	var cuttable := false
-	var contact_time := INF if training else _sheath_projectile_contact_time()
+	var contact_time := INF
+	if guard_contact >= 0.0: contact_time = guard_contact
+	elif not training or not weapon_trial_id.is_empty(): contact_time = _sheath_projectile_contact_time()
 	for enemy in enemies:
 		if not is_instance_valid(enemy) or enemy.dead or enemy.is_queued_for_deletion(): continue
 		if bool(enemy.get_meta("campaign_staging",false)) or enemy.enemy_kind in ["barrier","beam"]: continue
 		if not cuttable and enemy.position.z >= PLAYER_CUT_MIN_Z and enemy.position.z <= PLAYER_CUT_MAX_Z:
 			cuttable = enemy.is_visible_in_tree() and not camera.is_position_behind(enemy.get_aim_point())
-		if not training and victory_timer < 0.0 and contact_time > SHEATH_ALERT_PEAK_LEAD:
+		if guard_contact < 0.0 and not training and victory_timer < 0.0 and contact_time > SHEATH_ALERT_PEAK_LEAD:
 			var horizon := minf(SHEATH_ALERT_LEAD,contact_time)
 			contact_time = minf(contact_time,_sheath_melee_contact_time(enemy,horizon))
 			if contact_time > SHEATH_ALERT_PEAK_LEAD and projectiles.size() < MAX_PROJECTILES:
@@ -1225,41 +1546,39 @@ func _sheath_ranged_contact_time(enemy: Node3D, horizon: float) -> float:
 func _sheath_projectile_contact_time() -> float:
 	var earliest := INF
 	for projectile: Dictionary in projectiles:
-		if bool(projectile.reflected) or bool(projectile.get("player_plane_passed",false)): continue
-		var node: Node3D = projectile.node
-		var time := _projectile_player_plane_time(projectile,SHEATH_ALERT_LEAD)
-		var behavior := str(projectile.get("series_behavior",""))
-		if not behavior.is_empty():
-			var delay := maxf(0.0,float(projectile.series_next)-float(projectile.age))
-			if delay <= SHEATH_ALERT_LEAD and delay < time:
-				var origin := node.global_position
-				match behavior:
-					"prime":
-						earliest = minf(earliest,delay+_projectile_flight_contact(origin,projectile.launch_velocity,node.collision_radius))
-					"beacon":
-						var source: Node3D = projectile.source
-						if projectiles.size() < MAX_PROJECTILES and is_instance_valid(source) and not source.dead and source.has_attack_limb():
-							earliest = minf(earliest,delay+_forecast_projectile_contact(origin,"bolt"))
-					"bend":
-						origin += Vector3(projectile.velocity)*delay
-						var target: Vector3 = projectile.series_options.get("target",PROJECTILE_TARGET)
-						var velocity := (target-origin).normalized()*Vector3(projectile.launch_velocity).length()
-						earliest = minf(earliest,delay+_projectile_flight_contact(origin,velocity,node.collision_radius))
-				continue
-		if not is_finite(time) or time >= earliest or not _projectile_touches_player(projectile,time): continue
-		var volley := str(node.get_meta("volley_id",""))
-		if not volley.is_empty() and float(_volley_damage.get(volley,-INF)) > game_clock+time:
-			continue
-		var intercepted := false
-		for reflected: Dictionary in projectiles:
-			if bool(reflected.reflected) and is_finite(_projectile_pair_time(reflected,projectile,time+PROJECTILE_EVENT_TIE_EPSILON)):
-				# Only suppress the warning if the actual event order allows
-				# this interception, including collisions with enemy material.
-				var next := _next_projectile_event(time+PROJECTILE_EVENT_TIE_EPSILON)
-				intercepted = next.get("kind","") == "intercept" and next.other.node == node
-				break
-		if not intercepted: earliest = time
+		earliest = minf(earliest,_projectile_contact_time(projectile,minf(SHEATH_ALERT_LEAD,earliest)))
 	return earliest
+
+
+func _projectile_contact_time(projectile: Dictionary, horizon: float) -> float:
+	if bool(projectile.reflected) or bool(projectile.get("player_plane_passed",false)): return INF
+	var node: Node3D = projectile.node
+	var time := _projectile_player_plane_time(projectile,horizon)
+	if projectile.has("series_behavior"):
+		var delay := maxf(0.0,float(projectile.series_next)-float(projectile.age))
+		if delay <= horizon and delay < time:
+			var origin := node.global_position
+			match str(projectile.series_behavior):
+				"prime":
+					return delay+_projectile_flight_contact(origin,projectile.launch_velocity,node.collision_radius)
+				"beacon":
+					var source: Node3D = projectile.source
+					if projectiles.size() < MAX_PROJECTILES and is_instance_valid(source) and not source.dead and source.has_attack_limb():
+						return delay+_forecast_projectile_contact(origin,"bolt")
+					return INF
+				"bend":
+					origin += Vector3(projectile.velocity)*delay
+					var target: Vector3 = projectile.series_options.get("target",PROJECTILE_TARGET)
+					var velocity := (target-origin).normalized()*Vector3(projectile.launch_velocity).length()
+					return delay+_projectile_flight_contact(origin,velocity,node.collision_radius)
+	if not is_finite(time) or not _projectile_touches_player(projectile,time): return INF
+	var volley := str(node.get_meta("volley_id",""))
+	if not volley.is_empty() and float(_volley_damage.get(volley,-INF)) > game_clock+time: return INF
+	for reflected: Dictionary in projectiles:
+		if bool(reflected.reflected) and is_finite(_projectile_pair_time(reflected,projectile,time+PROJECTILE_EVENT_TIE_EPSILON)):
+			var next := _next_projectile_event(time+PROJECTILE_EVENT_TIE_EPSILON)
+			return INF if next.get("kind","") == "intercept" and next.other.node == node else time
+	return time
 
 
 func _begin_guard() -> void:
@@ -1344,7 +1663,7 @@ func _try_guard(source: String = "incoming", enemy: Node3D = null) -> bool:
 		combat_stats["perfects"] = int(combat_stats.get("perfects", 0)) + 1
 		audio.play_event("perfect")
 		var displayed_gain := roundi(gain)
-		_notice("完美振刀  +%d 速度" % displayed_gain if displayed_gain > 0 else "完美振刀", 1.4)
+		_notice(Locale.text("完美振刀  +%d 速度") % displayed_gain if displayed_gain > 0 else "完美振刀", 1.4)
 	else:
 		audio.play_event("parry")
 		_notice("格挡成功", 1.1)
@@ -1352,7 +1671,7 @@ func _try_guard(source: String = "incoming", enemy: Node3D = null) -> bool:
 
 
 func _hurt(amount: int = 1, source: String = "contact", enemy: Node3D = null) -> void:
-	if state != "playing" or invincible:
+	if state != "playing" or invincible or _tutorial_active() or not weapon_trial_id.is_empty():
 		return
 	health = maxi(1 if practice else 0, health - amount)
 	combo = 0
@@ -1366,7 +1685,26 @@ func _hurt(amount: int = 1, source: String = "contact", enemy: Node3D = null) ->
 		_finish(false)
 
 
+func _tutorial_active() -> bool:
+	return tutorial != null and tutorial.active
+
+
+func _earn_weapon_currency(enemy: Node3D) -> void:
+	if state != "playing" or not _reward_currency or practice or training or invincible or not campaign.active:
+		return
+	if enemy.enemy_kind in ["barrier","beam"]: return
+	var amount := 35 if enemy == boss_enemy or bool(enemy.get_meta("campaign_boss_unit",false)) else 10
+	weapon_shop.earn(amount)
+	_run_currency += amount
+
+
+func _flush_weapon_currency() -> void:
+	if weapon_shop.flush() != OK:
+		push_warning("Weapon shop currency could not be saved.")
+
+
 func _finish(won: bool) -> void:
+	_flush_weapon_currency()
 	state = "won" if won else "dead"
 	_record_combat(state)
 	_reset_input()
@@ -2692,7 +3030,10 @@ func _apply_projectile_explosion(payload: Dictionary) -> void:
 				continue
 			hit_count += 1
 			removed_total += removed
-			_record_combat("reflected_hit",enemy,{"removed":removed,"killed":bool(result.get("killed",false)),"direct_hit":enemy == target,"blast_radius":radius,"projectile_kind":kind})
+			var killed := bool(result.get("killed",false))
+			if killed and enemy.enemy_kind != BOSS_CARRIER_KIND:
+				reflected_kills += 1
+			_record_combat("reflected_hit",enemy,{"removed":removed,"killed":killed,"direct_hit":enemy == target,"blast_radius":radius,"projectile_kind":kind})
 		if removed_total > 0:
 			# The blast owns a stronger local impact. Continuous sword input and
 			# held-mode camera locking still use the normal world-freeze path.
@@ -2818,6 +3159,7 @@ func _on_enemy_severed(enemy: Node3D, point: Vector3, removed_count: int) -> voi
 		_record_combat("carrier_destroyed",enemy,{"removed":removed_count})
 		return
 	kills += 1
+	_earn_weapon_currency(enemy)
 	combat_stats["kills"] = kills
 	_record_combat("severed", enemy, {"removed": removed_count})
 	combo += 1
@@ -2829,8 +3171,6 @@ func _on_enemy_severed(enemy: Node3D, point: Vector3, removed_count: int) -> voi
 	if sword.has_method("impact"):
 		sword.impact(1.6)
 	audio.play_event("kill", 0.8 + float(gear) * 0.15)
-	if show_timing:
-		_notice("关键结构斩断  ×%d" % combo, 0.85)
 	if bool(enemy.get_meta("campaign_boss_unit",false)) and SeriesScript.supports(str(enemy.enemy_kind)):
 		series_combat.begin_death(enemy)
 		var survivors := false
@@ -2909,22 +3249,50 @@ func _on_enemy_damaged(enemy: Node3D, point: Vector3, removed_count: int) -> voi
 	if sword.has_method("impact"):
 		sword.impact(clampf(float(removed_count) / 45.0, 0.55, 1.0))
 	audio.play_event("hit", 0.95)
-	if not show_timing:
-		return
-	if bool(enemy.get("dead")):
-		_notice("残骸切碎", 0.45)
-	else:
-		_notice("装甲剥离 · 切断发光核心连接", 0.6)
 
 
-func _update_hud() -> void:
-	if hud == null:
-		return
-	var targets: Array = []
+func _guard_forecast() -> Dictionary:
+	if state != "playing" or not guard_active or (training and weapon_trial_id.is_empty()): return {}
+	var targets: Array[Dictionary] = []
+	var nearest := INF
 	for enemy in enemies:
-		if not is_instance_valid(enemy) or enemy.dead or enemy.resolved or bool(enemy.get_meta("campaign_staging",false)) or camera.is_position_behind(enemy.get_aim_point()):
+		if not is_instance_valid(enemy) or enemy.dead or enemy.is_queued_for_deletion(): continue
+		if bool(enemy.get_meta("campaign_staging",false)): continue
+		var time := INF
+		if victory_timer < 0.0 and enemy.enemy_kind not in ["barrier","beam"]:
+			time = _sheath_melee_contact_time(enemy,GUARD_COUNTDOWN_HORIZON)
+			if projectiles.size() < MAX_PROJECTILES:
+				time = minf(time,_sheath_ranged_contact_time(enemy,minf(GUARD_COUNTDOWN_HORIZON,time)))
+			nearest = minf(nearest,time)
+		if enemy.resolved or not enemy.is_visible_in_tree(): continue
+		var aim: Vector3 = enemy.get_aim_point()
+		if camera.is_position_behind(aim): continue
+		var incoming := time <= GUARD_COUNTDOWN_HORIZON
+		if not incoming and enemy.position.z < PLAYER_CUT_MIN_Z: continue
+		targets.append({"screen":camera.unproject_position(aim),"time_left":time if incoming else -1.0,
+			"progress":clampf(1.0-time/1.8,0.0,1.0) if incoming else 0.0,"kind":enemy.enemy_kind,
+			"can_cut":enemy.position.z >= PLAYER_CUT_MIN_Z and enemy.position.z <= PLAYER_CUT_MAX_Z})
+	for projectile: Dictionary in projectiles:
+		if bool(projectile.reflected): continue
+		var time := _projectile_contact_time(projectile,GUARD_COUNTDOWN_HORIZON)
+		nearest = minf(nearest,time)
+		var point: Vector3 = projectile.node.global_position
+		if camera.is_position_behind(point): continue
+		var incoming := time <= GUARD_COUNTDOWN_HORIZON
+		if not incoming and point.z < -25.0: continue
+		targets.append({"screen":camera.unproject_position(point),"time_left":time if incoming else -1.0,
+			"progress":clampf(1.0-time/1.2,0.0,1.0) if incoming else 0.0,"kind":"projectile","can_cut":point.z >= PLAYER_CUT_MIN_Z})
+	return {"nearest":nearest,"targets":targets}
+
+
+func _passive_targets() -> Array[Dictionary]:
+	var targets: Array[Dictionary] = []
+	for enemy in enemies:
+		if not is_instance_valid(enemy) or enemy.dead or enemy.resolved or bool(enemy.get_meta("campaign_staging",false)):
 			continue
 		if enemy.has_meta("deployment_fade_age") and not enemy.visible: continue
+		var aim: Vector3 = enemy.get_aim_point()
+		if camera.is_position_behind(aim): continue
 		var time_left: float = maxf(0.0, (-enemy.position.z - 4.5) / (speed + ENEMY_RUN_SPEED))
 		var kind: String = enemy.enemy_kind
 		var action: String = str(enemy.get_meta("action_state", "run"))
@@ -2936,36 +3304,37 @@ func _update_hud() -> void:
 			time_left = maxf(0.0, duration * 0.55 - action_time)
 		elif kind == "boss":
 			time_left = maxf(0.0, boss_timer) + 1.3
-		var target_label: String = {"tank":"肉盾 · 二连击","ranged":"射手","boss":"核心守卫","drone":"巡飞机","missile_drone":"双弹舱重机","barrier":"斩断锁梁","beam":"切断斜撑"}.get(kind,"迎面攻击")
-		if kind == BOSS_CARRIER_KIND: target_label = "吊装运兵船 · 可斩"
 		if SeriesScript.supports(kind):
-			target_label = str(SeriesScript.info(kind).label)
 			if action in ["charge","fire","recover","stagger","exit","run","feint"]: time_left = -1.0
-			if bool(enemy.get_series_integrity_state().get("vulnerable",false)): target_label += " · 核心暴露"
-		if show_timing: target_label = str(series_kind_info(kind).get("series_label",ENEMY_SERIES_LABEL))+" · "+target_label
 		var sky: bool = enemy.has_meta("sky_lane")
 		var entering: bool = bool(enemy.get_meta("entry_active",false))
 		var auxiliary_carrier: bool = kind == BOSS_CARRIER_KIND
-		if auxiliary_carrier: time_left = -1.0
-		if sky:
-			time_left = -1.0
-			target_label = "天空 · "+target_label
-		if entering:
-			time_left = -1.0
-			target_label = "入场 · "+target_label
-		if training:
-			time_left = -1.0
-			target_label = "切割靶"
+		if auxiliary_carrier or sky or entering or training: time_left = -1.0
 		if not training and enemy.position.z < PLAYER_CUT_MIN_Z and time_left > 2.5:
 			continue
-		targets.append({"screen": camera.unproject_position(enemy.get_aim_point()), "progress": 0.0 if time_left < 0.0 or sky or entering or auxiliary_carrier else clampf(1.0 - time_left / 1.8, 0.0, 1.0), "kind": kind, "can_cut": enemy.position.z >= PLAYER_CUT_MIN_Z, "label": target_label, "time_left": time_left, "action": action})
+		targets.append({"screen":camera.unproject_position(aim),"progress":0.0 if time_left < 0.0 else clampf(1.0-time_left/1.8,0.0,1.0),"time_left":time_left})
 	for projectile in projectiles:
 		var projectile_node: Node3D = projectile.node
-		if bool(projectile.reflected) or projectile_node.position.z < -25.0 or camera.is_position_behind(projectile_node.global_position):
+		if bool(projectile.reflected) or camera.is_position_behind(projectile_node.global_position):
 			continue
+		if projectile_node.position.z < -25.0: continue
 		var impact_time: float = maxf(0.0, (-projectile_node.position.z - 0.9) / maxf(projectile.velocity.z, 0.1))
-		targets.append({"screen": camera.unproject_position(projectile_node.global_position), "progress": clampf(1.0 - impact_time / 1.2, 0.0, 1.0), "kind": "projectile", "can_cut": true, "label": "斩爆 / 反射", "time_left": impact_time})
+		targets.append({"screen":camera.unproject_position(projectile_node.global_position),"progress":clampf(1.0-impact_time/1.2,0.0,1.0),"time_left":impact_time})
+	return targets
+
+
+func _update_hud(guard_prediction: Dictionary = {}) -> void:
+	if hud == null:
+		return
+	if guard_prediction.is_empty() and guard_active:
+		guard_prediction = _guard_forecast()
 	hud.set_snapshot({
+		"tutorial":tutorial.snapshot() if _tutorial_active() else {},
+		"shop_weapons":weapon_shop.catalog() if state == "menu" else [],
+		"currency":weapon_shop.currency,"run_currency":_run_currency,"shop_message":shop_message,
+		"weapon_family":weapon_combat.family,"weapon_trial":not weapon_trial_id.is_empty(),"weapon_trial_finish":_trial_finish,
+		"weapon_charge":weapon_combat.charge,
+		"heavy_preview":weapon_combat.heavy_preview(get_viewport().get_visible_rect().size) if state == "playing" else PackedVector2Array(),
 		"menu_ready":menu_prepared and (campaign == null or campaign.assets_ready),"ui_settings":ui_settings.duplicate(),
 		"warm_completed":campaign.warm_completed if campaign != null else 0,"warm_total":campaign.warm_total if campaign != null else 0,
 		"campaign_active":campaign.active if campaign != null else false,"campaign_level":campaign.current_level_index+1 if campaign != null else 1,
@@ -2984,8 +3353,10 @@ func _update_hud() -> void:
 		"flash": hurt_flash, "message": message if message_timer > 0.0 else "",
 		"boss": boss_spawned, "practice": practice,
 		"invincible": invincible,
-		"training": training, "targets": targets, "cut_serial": cut_serial,
-		"show_timing": show_timing,
+		"training": training,"targets":_passive_targets() if state == "playing" and guard_prediction.is_empty() else [],"cut_serial": cut_serial,
+		"guard_targets":guard_prediction.get("targets",[]),"cut_total":cut_total,"cut_feedback_serial":cut_total,
+		"cut_feedback_kind":_cut_feedback_kind,"cut_feedback_force":_cut_feedback_force,
+		"reflected_kills":reflected_kills,"cut_popups":_active_cut_popups() if state == "playing" else [],
 		"touch_mode": touch_mode,
 		"min_speed": MIN_SPEED, "max_speed": MAX_SPEED,
 		"run_distance": run_distance, "effective_runner_speed": effective_runner_speed,
@@ -3156,6 +3527,7 @@ func _build_world() -> void:
 	world_environment.environment = environment
 	add_child(world_environment)
 	var key_light: DirectionalLight3D = DirectionalLight3D.new()
+	key_light.light_cull_mask &= ~TitleAttractScript.TITLE_LAYER
 	key_light.rotation_degrees = Vector3(-46, -32, 0)
 	key_light.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_ONLY
 	key_light.light_color = Color(0.88, 0.92, 1.0)
@@ -3165,6 +3537,7 @@ func _build_world() -> void:
 	key_light.shadow_bias = 0.035
 	add_child(key_light)
 	var rim_light: DirectionalLight3D = DirectionalLight3D.new()
+	rim_light.light_cull_mask &= ~TitleAttractScript.TITLE_LAYER
 	rim_light.sky_mode = DirectionalLight3D.SKY_MODE_LIGHT_ONLY
 	rim_light.rotation_degrees = Vector3(-24, 145, 0)
 	rim_light.light_color = Color(1.0, 0.56, 0.25)

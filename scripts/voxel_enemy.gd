@@ -1812,6 +1812,41 @@ func blast_at(world_point: Vector3, radius: float) -> Dictionary:
 	return result
 
 
+func cut_wave(sweep: Transform3D, limits: AABB, stroke: Vector2) -> Dictionary:
+	if dead or not _configured:
+		return {"removed":0}
+	var start_time := Time.get_ticks_usec()
+	var inverse := sweep.affine_inverse()
+	var poses: Array[Transform3D] = []
+	var relevant: Array[bool] = []
+	for part in range(PART_COUNT):
+		var pose := inverse*global_transform*_part_pose(part)
+		poses.append(pose)
+		var mesh: ArrayMesh = _part_meshes[part].mesh
+		relevant.append(mesh != null and limits.intersects(pose*mesh.get_aabb()))
+	if not relevant.has(true):
+		return {"removed":0}
+	var removed := PackedInt32Array()
+	var half_span := limits.size.x*0.5
+	var half_height := limits.size.y*0.5
+	for index in _live_indices:
+		var part: int = _part_ids[index]
+		if _voxels[index] == 0 or not relevant[part]: continue
+		var center: Vector3 = poses[part]*_cell_points[index]
+		if not limits.has_point(center): continue
+		var across := center.x/half_span
+		if absf(center.y) > half_height*sqrt(maxf(0.0,1.0-across*across)): continue
+		removed.append(index)
+	if removed.is_empty():
+		return {"removed":0}
+	removed = _entry_material_budget(removed,sweep.origin,true)
+	if removed.is_empty():
+		return {"removed":0,"contact":true}
+	var result := _commit_material_cut(removed,stroke,get_viewport().get_camera_3d(),start_time)
+	result.contact = true
+	return result
+
+
 func trace_projectile(from: Vector3, to: Vector3, radius: float = 0.0) -> Dictionary:
 	if dead or not _configured:
 		return {"hit": false, "fraction": 1.0}
